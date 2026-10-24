@@ -14,8 +14,10 @@ Anything you don't configure doesn't exist for the agent.
 
 ## Status
 
-🚧 **Bootstrapping.** The app catalog and its validation are in place; the agent
-is next. See [PLAN.md](PLAN.md).
+🚧 **M0, plumbing.** Alerts come in (Alertmanager, Grafana, generic JSON), are routed
+to a watched app through the catalog, and a placeholder message goes out to every enabled
+channel above its severity floor. The agent is next. See [PLAN.md](PLAN.md) and
+[docs/milestones](docs/milestones/).
 
 ## Which apps it watches
 
@@ -33,6 +35,20 @@ there.
 cp .env.example .env              # fill in values; .env is gitignored
 gh secret set --env dev -f .env   # upload the same values to GitHub
 ```
+
+## Running it
+
+```bash
+cp .env.example .env              # set the channels you want; see the comments
+docker compose up --build         # listens on 127.0.0.1:8000
+curl -X POST localhost:8000/alerts/alertmanager -H 'content-type: application/json' \
+  -d @tests/fixtures/alertmanager_firing_critical.json
+curl localhost:8000/apps          # which channels are enabled for each app
+```
+
+Point Alertmanager or Grafana webhooks at `POST /alerts/alertmanager`; anything else can
+post `{title, severity, labels, started_at}` to `POST /alerts/generic`. `GET /metrics`
+exposes `nightswatch_unmatched_alerts_total`.
 
 ## Development
 

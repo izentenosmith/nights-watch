@@ -1,0 +1,6 @@
+{
+  "title": "Error rate above 5% on knock-knock",
+  "severity": "critical",
+  "labels": { "namespace": "knock-knock", "alertname": "HighErrorRate" },
+  "started_at": "2026-10-24T03:00:00Z"
+}

@@ -1,0 +1,16 @@
+# secrets reach the container through compose's env_file, never through the image
+.env
+.env.*
+*.kubeconfig
+kubeconfig*
+
+.git
+.github
+.venv
+.workflow
+.claude
+**/__pycache__
+.pytest_cache
+.ruff_cache
+tests
+docs

@@ -6,6 +6,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from nights_watch.catalog.domain import LabelMatcher, WatchedApp
+
 # Catalog files hold variable NAMES, never values: the values live in .env or GitHub secrets.
 ENV_NAME = r"^NW_[A-Z0-9_]+$"
 APP_NAME = r"^[a-z0-9]+(-[a-z0-9]+)*$"
@@ -53,12 +55,12 @@ class Sources(_Strict):
 
 class WebhookChannel(_Strict):
     webhook_env: str | None = Field(None, pattern=ENV_NAME)  # None → global NW_*_WEBHOOK_URL
-    min_severity: Severity = "warning"
+    min_severity: Severity | None = None  # None → global NW_*_MIN_SEVERITY
 
 
 class WhatsAppChannel(_Strict):
     to_env: str | None = Field(None, pattern=ENV_NAME)  # None → global NW_WHATSAPP_TO
-    min_severity: Severity = "critical"
+    min_severity: Severity | None = None  # None → global NW_WHATSAPP_MIN_SEVERITY
 
 
 class Notify(_Strict):
@@ -75,6 +77,9 @@ class AppFile(_Strict):
     components: list[Component] = []
     sources: Sources
     notify: Notify = Notify()
+
+    def to_watched_app(self) -> WatchedApp:
+        return WatchedApp(self.name, LabelMatcher(self.match))
 
 
 def parse_app_file(path: Path) -> AppFile:

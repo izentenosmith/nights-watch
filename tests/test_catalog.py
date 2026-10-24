@@ -130,3 +130,15 @@ def test_severity_floor_is_one_of_the_three_levels(tmp_path):
     _write(tmp_path, "shop", notify={"slack": {"min_severity": "urgent"}})
     with pytest.raises(CatalogError):
         load_catalog(tmp_path)
+
+
+def test_channel_without_a_floor_inherits_the_global_floor(tmp_path):
+    _write(tmp_path, "shop", notify={"slack": {"webhook_env": "NW_SHOP_SLACK_WEBHOOK_URL"}})
+    assert load_catalog(tmp_path)["shop"].notify.slack.min_severity is None
+
+
+def test_an_app_file_becomes_a_watched_app(tmp_path):
+    _write(tmp_path, "shop", match={"namespace": "shop", "app": "api"})
+    app = load_catalog(tmp_path)["shop"].to_watched_app()
+    assert app.name == "shop"
+    assert app.matcher.matches({"namespace": "shop", "app": "api", "pod": "x"})
