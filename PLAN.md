@@ -207,13 +207,16 @@ LLM evals call a real model, so they aren't unit tests: they run locally
 
 ## 7. Milestones
 
+Each milestone has its own doc with scope, deliverables, acceptance criteria and
+its definition of done.
+
 | # | Milestone | Needs a running system? |
 |---|---|---|
-| **M0** | Plumbing: FastAPI receives an Alertmanager payload and posts a placeholder to each enabled channel, by severity | no |
-| **M1** | The agent on recorded data: the full graph with replayed tools, 5 scenarios, the local eval harness | no |
-| **M2** | Real sources (Prometheus, Loki, Kubernetes, GitHub) against knock-knock | yes |
-| **M3** | Runbooks: hybrid search and a retrieval eval (recall@k) | no |
-| **M4** | AWS reference deployment (Bedrock, Fargate) | yes, in AWS |
+| **M0** | [Plumbing](docs/milestones/M0-plumbing.md): FastAPI receives an Alertmanager payload and posts a placeholder to each enabled channel, by severity | no |
+| **M1** | [The agent on recorded data](docs/milestones/M1-agent-on-recorded-data.md): the full graph with replayed tools, 5 scenarios, the local eval harness | no |
+| **M2** | [Live sources](docs/milestones/M2-live-sources.md) (Prometheus, Loki, Kubernetes, GitHub) against knock-knock | yes, knock-knock in k3d |
+| **M3** | [Runbooks](docs/milestones/M3-runbooks.md): hybrid search and a retrieval eval (recall@k) | no |
+| **M4** | [AWS reference deployment](docs/milestones/M4-aws.md): Bedrock, one EC2 with k3s, deployed from `main` | yes, in AWS |
 
 ---
 
