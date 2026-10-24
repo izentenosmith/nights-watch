@@ -89,23 +89,3 @@ def test_the_view_lists_every_channel_with_its_floor():
         TEAMS: (True, WARNING),
         WHATSAPP: (True, CRITICAL),
     }
-
-
-@pytest.mark.parametrize(
-    "old, new, expected",
-    [
-        (WARNING, CRITICAL, [WHATSAPP]),
-        (Severity.INFO, WARNING, [SLACK, TEAMS]),
-        (Severity.INFO, CRITICAL, [SLACK, TEAMS, WHATSAPP]),
-        (CRITICAL, CRITICAL, []),
-        (CRITICAL, WARNING, []),
-    ],
-    ids=["warning to critical", "info to warning", "info to critical", "no change", "lower"],
-)
-def test_a_rising_severity_newly_reaches_only_the_channels_it_crosses(old, new, expected):
-    assert channels(policy().newly_reached("shop", old, new)) == expected
-
-
-def test_newly_reached_uses_the_app_destination():
-    p = policy(shop={WHATSAPP: ChannelOverride(destination="+shop")})
-    assert p.newly_reached("shop", WARNING, CRITICAL) == [Delivery(WHATSAPP, "+shop")]

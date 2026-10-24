@@ -7,7 +7,9 @@ from nights_watch.triage.domain.incident import (
     FeedbackNotAllowed,
     Incident,
     IncidentStatus,
+    NotThisIncident,
     StatusError,
+    UnknownAlert,
     Vote,
     group_key_of,
 )
@@ -105,11 +107,6 @@ def test_a_resolved_alert_that_fires_again_is_firing():
     assert incident.resolve("fp-b", at(4)) is False
 
 
-def test_it_holds_its_alerts():
-    incident = Incident.open(alert("a"), "shop", T0)
-    assert incident.holds("fp-a") and not incident.holds("fp-z")
-
-
 @pytest.mark.parametrize(
     "path",
     [
@@ -165,3 +162,63 @@ def test_feedback_after_a_diagnosis_is_kept_and_a_later_vote_replaces_it():
     incident.advance_to(IncidentStatus.RESOLVED)
     incident.record_feedback(Vote.DOWN)
     assert incident.feedback is Vote.DOWN
+
+
+def test_an_alert_still_firing_in_the_incident_is_accepted_whatever_the_window():
+    incident = Incident.open(alert("a"), "shop", T0)
+    assert incident.accepts(alert("a"), at(240), WINDOW)  # Alertmanager's 4 h reminder
+    assert not incident.accepts(alert("b"), at(240), WINDOW)
+
+
+def test_an_alert_that_resolved_is_not_kept_past_the_window():
+    incident = Incident.open(alert("a"), "shop", T0)
+    incident.attach(alert("b"), T0)
+    incident.resolve("fp-a", at(1))
+    assert not incident.accepts(alert("a"), at(60), WINDOW)
+
+
+def test_it_knows_which_alerts_are_firing():
+    incident = Incident.open(alert("a"), "shop", T0)
+    incident.attach(alert("b"), at(1))
+    incident.resolve("fp-a", at(2))
+    assert not incident.firing("fp-a") and incident.firing("fp-b") and not incident.firing("fp-z")
+
+
+def test_attaching_an_alert_of_another_group_is_refused():
+    incident = Incident.open(alert("a"), "shop", T0)
+    with pytest.raises(NotThisIncident):
+        incident.attach(alert("b", alertname="Other"), at(1))
+
+
+def test_resolving_an_alert_it_doesnt_hold_is_refused():
+    incident = Incident.open(alert("a"), "shop", T0)
+    with pytest.raises(UnknownAlert):
+        incident.resolve("fp-z", at(1))
+
+
+def test_resolving_again_changes_nothing():
+    incident = Incident.open(alert("a"), "shop", T0)
+    assert incident.resolve("fp-a", at(1)) is True
+    assert incident.resolve("fp-a", at(2)) is False
+    assert incident.alerts["fp-a"].last_seen == at(1)
+
+
+@pytest.mark.parametrize("step", ["open", "attach", "resolve"])
+def test_times_without_a_zone_are_refused(step):
+    naive = T0.replace(tzinfo=None)
+    incident = Incident.open(alert("a"), "shop", T0)
+    with pytest.raises(ValueError, match="time zone"):
+        if step == "open":
+            Incident.open(alert("a"), "shop", naive)
+        elif step == "attach":
+            incident.attach(alert("b"), naive)
+        else:
+            incident.resolve("fp-a", naive)
+
+
+def test_channels_told_are_remembered_and_can_be_released():
+    incident = Incident.open(alert("a"), "shop", T0)
+    assert incident.notified == set()
+    incident.mark_notified({"slack", "teams"})
+    incident.unmark_notified({"teams"})
+    assert incident.notified == {"slack"}

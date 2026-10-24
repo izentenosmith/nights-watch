@@ -1,5 +1,6 @@
-"""route → open or attach to an incident → notify. Messages go out when an incident opens and,
-when its severity rises, to the channels the new severity newly reaches. No agent yet (M1b)."""
+"""route → open or attach to an incident → notify. Each channel the incident's severity reaches
+hears about it once: when it opens, or when its severity rises to the channel's floor. A channel
+whose message failed is tried again on the incident's next alert. No agent yet (M1b)."""
 
 import asyncio
 import logging
@@ -32,6 +33,7 @@ class Event(StrEnum):
     ESCALATED = "escalated"
     ALERT_RESOLVED = "alert resolved"
     RESOLVED = "resolved"
+    FAILED = "failed"  # couldn't be stored; logged, and the request answers 500 so it's re-sent
 
 
 @dataclass(frozen=True)
@@ -75,8 +77,15 @@ class ReceiveAlert:
         self._send_timeout = send_timeout
 
     async def __call__(self, alerts: Iterable[Alert]) -> list[Outcome]:
-        """Each alert is handled on its own; all sends run at once."""
-        return list(await asyncio.gather(*(self._receive(a) for a in alerts)))
+        """Each alert is handled on its own, and one failing doesn't stop the others."""
+        alerts = list(alerts)
+        results = await asyncio.gather(*(self._receive(a) for a in alerts), return_exceptions=True)
+        return [self._failed(a, r) if isinstance(r, Exception) else r
+                for a, r in zip(alerts, results)]
+
+    def _failed(self, alert: Alert, error: Exception) -> Outcome:
+        log.error("alert %r couldn't be handled: %s", alert.title, type(error).__name__)
+        return Outcome(alert, Event.FAILED)
 
     async def _receive(self, alert: Alert) -> Outcome:
         app = self._route(alert)
@@ -96,11 +105,21 @@ class ReceiveAlert:
             run_url=self._run_url(incident.id), escalated=event is Event.ESCALATED,
         )
         delivered = await asyncio.gather(*(self._send(d, message) for d in deliveries))
+        failed = tuple(d.channel for d, ok in zip(deliveries, delivered) if not ok)
+        if failed:
+            await self._release(incident.id, failed)
         return Outcome(
             alert, event, app, incident.id,
             sent=tuple(d.channel for d, ok in zip(deliveries, delivered) if ok),
-            failed=tuple(d.channel for d, ok in zip(deliveries, delivered) if not ok),
+            failed=failed,
         )
+
+    async def _release(self, incident_id: str, channels: tuple[Channel, ...]) -> None:
+        """A channel whose message failed hasn't been told: the incident's next alert retries."""
+        async with self._lock:
+            incident = self._incidents.get(incident_id)
+            incident.unmark_notified({str(c) for c in channels})
+            self._incidents.save(incident)
 
     def _route(self, alert: Alert) -> str | None:
         candidates = self._router.candidates(alert.labels)
@@ -120,21 +139,25 @@ class ReceiveAlert:
 
     def _open_or_attach(self, alert: Alert, app: str) -> tuple[Incident, Event, list[Delivery]]:
         now = self._clock()
-        incident = self._incidents.find_open(app, group_key_of(alert))
+        incident = (self._incidents.find_firing(app, alert.fingerprint.value)
+                    or self._incidents.find_open(app, group_key_of(alert)))
         if incident is not None and incident.accepts(alert, now, self._window):
             previous = incident.attach(alert, now)
-            deliveries = self._policy.newly_reached(app, previous, incident.severity)
             event = Event.ESCALATED if incident.severity > previous else Event.ATTACHED
         else:
             incident = Incident.open(alert, app, now)
-            deliveries = self._policy.deliveries(app, incident.severity)
             event = Event.OPENED
+        # The channels this severity reaches that haven't been told yet. They're marked told now,
+        # under the lock, so another alert of this incident in the same batch doesn't tell them too.
+        deliveries = [d for d in self._policy.deliveries(app, incident.severity)
+                      if str(d.channel) not in incident.notified]
+        incident.mark_notified({str(d.channel) for d in deliveries})
         self._incidents.save(incident)
         return incident, event, deliveries
 
     def _resolve(self, alert: Alert, app: str) -> Outcome:
         fingerprint = alert.fingerprint.value
-        incident = self._incidents.find_holding(app, fingerprint)
+        incident = self._incidents.find_firing(app, fingerprint)
         if incident is None:
             log.info("resolved alert %r for %s: no open incident holds it, ignored",
                      alert.title, app)

@@ -8,14 +8,17 @@ from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from dotenv import dotenv_values
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from prometheus_client import CollectorRegistry, Counter
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from nights_watch.api import alerts, health, runs
+from nights_watch.api.errors import validation_failed
 from nights_watch.catalog.domain import AlertRouter
 from nights_watch.catalog.yaml_catalog import AppFile, CatalogError, describe, load_catalog
 from nights_watch.catalog.yaml_catalog import Severity as SeverityName
@@ -60,7 +63,7 @@ class Settings(BaseModel):
     whatsapp_template: str | None = None
     whatsapp_template_lang: str | None = None
     whatsapp_min_severity: SeverityName = "critical"
-    group_window: int = Field(300, ge=1)  # seconds
+    group_window: int = Field(900, ge=1, le=7 * 24 * 3600)  # seconds
     db_path: Path = Path("data/nightswatch.sqlite")
     public_url: str = "http://localhost:8000"
 
@@ -70,6 +73,14 @@ class Settings(BaseModel):
     @classmethod
     def _any_case(cls, value: str) -> str:
         return value.strip().lower()
+
+    @field_validator("public_url")
+    @classmethod
+    def _absolute_http_url(cls, value: str) -> str:
+        url = urlsplit(value)
+        if url.scheme not in ("http", "https") or not url.netloc:
+            raise ValueError("must be an absolute http(s) URL, e.g. https://nightswatch.example.com")
+        return value
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -201,6 +212,7 @@ def build_app(
         "Alerts that matched no watched app and were dropped.",
         registry=app.state.registry,
     )
+    app.add_exception_handler(RequestValidationError, validation_failed)
     app.include_router(alerts.router)
     app.include_router(health.router)
     app.include_router(runs.router)

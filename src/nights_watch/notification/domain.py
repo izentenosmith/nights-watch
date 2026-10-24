@@ -91,12 +91,6 @@ class NotificationPolicy:
             and severity >= self._floor(app, channel)
         ]
 
-    def newly_reached(self, app: str, old: Severity, new: Severity) -> list[Delivery]:
-        """When an incident's severity rises: the channels the new severity reaches and the old
-        one didn't. Channels already told aren't told again."""
-        already = {d.channel for d in self.deliveries(app, old)}
-        return [d for d in self.deliveries(app, new) if d.channel not in already]
-
     def view(self, app: str) -> dict[Channel, ChannelView]:
         return {
             channel: ChannelView(self._destination(app, channel) is not None, self._floor(app, channel))

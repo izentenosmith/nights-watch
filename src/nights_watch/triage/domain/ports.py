@@ -12,8 +12,8 @@ class IncidentRepository(Protocol):
         """The app's latest unresolved incident of that group."""
         ...
 
-    def find_holding(self, app: str, fingerprint: str) -> Incident | None:
-        """The app's latest unresolved incident holding that alert."""
+    def find_firing(self, app: str, fingerprint: str) -> Incident | None:
+        """The app's unresolved incident in which that alert is firing."""
         ...
 
     def save(self, incident: Incident) -> None: ...

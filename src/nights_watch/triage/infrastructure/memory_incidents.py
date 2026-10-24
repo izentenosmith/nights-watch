@@ -15,8 +15,8 @@ class MemoryIncidents:
     def find_open(self, app: str, group_key: str) -> Incident | None:
         return self._latest(lambda i: i.app == app and i.group_key == group_key)
 
-    def find_holding(self, app: str, fingerprint: str) -> Incident | None:
-        return self._latest(lambda i: i.app == app and i.holds(fingerprint))
+    def find_firing(self, app: str, fingerprint: str) -> Incident | None:
+        return self._latest(lambda i: i.app == app and i.firing(fingerprint))
 
     def save(self, incident: Incident) -> None:
         self._incidents[incident.id] = copy.deepcopy(incident)

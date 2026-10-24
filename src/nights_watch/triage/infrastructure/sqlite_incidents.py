@@ -14,7 +14,7 @@ from nights_watch.triage.domain.incident import AlertRecord, Incident, IncidentS
 
 SCHEMA_VERSION = 1
 SCHEMA = """
-CREATE TABLE incidents (
+CREATE TABLE IF NOT EXISTS incidents (
     id            TEXT PRIMARY KEY,
     app           TEXT NOT NULL,
     group_key     TEXT NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE incidents (
     last_alert_at TEXT NOT NULL,
     document      TEXT NOT NULL
 );
-CREATE INDEX incidents_by_group ON incidents (app, group_key, status, last_alert_at);
+CREATE INDEX IF NOT EXISTS incidents_by_group ON incidents (app, group_key, status, last_alert_at);
 """
 
 
@@ -36,7 +36,7 @@ class SqliteIncidents:
         # One event-loop thread uses it, and the use case serializes writes under its lock.
         self._db = sqlite3.connect(path, check_same_thread=False)
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
-        if version == 0:
+        if version == 0:  # new, or a creation a crash cut short: every statement is idempotent
             with self._db:
                 self._db.executescript(SCHEMA)
                 self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -55,10 +55,11 @@ class SqliteIncidents:
             app, group_key, str(IncidentStatus.RESOLVED),
         )
 
-    def find_holding(self, app: str, fingerprint: str) -> Incident | None:
+    def find_firing(self, app: str, fingerprint: str) -> Incident | None:
         return self._one(
             "SELECT document FROM incidents, json_each(incidents.document, '$.alerts') AS alert"
             " WHERE app = ? AND status != ? AND alert.key = ?"
+            " AND json_extract(alert.value, '$.firing')"
             " ORDER BY last_alert_at DESC LIMIT 1",
             app, str(IncidentStatus.RESOLVED), fingerprint,
         )
@@ -92,6 +93,7 @@ def _document(incident: Incident) -> dict:
         "opened_at": _time(incident.opened_at),
         "last_alert_at": _time(incident.last_alert_at),
         "status": str(incident.status),
+        "notified": sorted(incident.notified),
         "diagnosed": incident.diagnosed,
         "feedback": incident.feedback and str(incident.feedback),
         "alerts": {
@@ -115,6 +117,7 @@ def _incident(document: dict) -> Incident:
         opened_at=datetime.fromisoformat(document["opened_at"]),
         last_alert_at=datetime.fromisoformat(document["last_alert_at"]),
         status=IncidentStatus[document["status"].upper()],
+        notified=set(document["notified"]),
         diagnosed=document["diagnosed"],
         feedback=Vote(document["feedback"]) if document["feedback"] else None,
         alerts={

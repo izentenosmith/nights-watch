@@ -93,3 +93,73 @@ def test_resolved_and_unmatched_alerts_are_logged(caplog):
     messages = [r.getMessage() for r in caplog.records]
     assert any("resolved" in m for m in messages)
     assert any("matches no watched app" in m for m in messages)
+
+
+class Recorder:
+    def __init__(self, fail=False):
+        self.messages = []
+        self.fail = fail
+
+    async def send(self, message, destination):
+        self.messages.append(message)
+        if self.fail:
+            raise RuntimeError("down")
+
+
+def run(use_case, *alerts):
+    return asyncio.run(use_case(list(alerts)))
+
+
+def labelled(pod, severity=Severity.CRITICAL, status=Status.FIRING):
+    return Alert("Disk full", severity, {"ns": "shop", "alertname": "DiskFull", "pod": pod},
+                 status, datetime.now(UTC), Fingerprint(f"fp-{pod}"))
+
+
+def test_the_outcome_names_what_happened_to_each_alert():
+    case = use_case(POLICY, {c: Recorder() for c in Channel})
+    (opened,) = run(case, labelled("a", Severity.WARNING))
+    (attached,) = run(case, labelled("b", Severity.WARNING))
+    (escalated,) = run(case, labelled("c", Severity.CRITICAL))
+    (alert_resolved,) = run(case, labelled("a", status=Status.RESOLVED))
+    (ignored,) = run(case, labelled("z", status=Status.RESOLVED))
+    run(case, labelled("b", status=Status.RESOLVED))
+    (resolved,) = run(case, labelled("c", status=Status.RESOLVED))
+    assert [o.event for o in (opened, attached, escalated, alert_resolved, ignored, resolved)] == [
+        "opened", "attached", "escalated", "alert resolved", "ignored", "resolved"]
+    assert {o.incident_id for o in (opened, attached, escalated, alert_resolved, resolved)} == {
+        opened.incident_id}
+    assert ignored.incident_id is None
+
+
+def test_a_channel_that_failed_is_told_on_the_next_alert_and_the_others_are_not_told_twice():
+    slack, teams = Recorder(fail=True), Recorder()
+    case = use_case(POLICY, {Channel.SLACK: slack, Channel.TEAMS: teams,
+                             Channel.WHATSAPP: Recorder()})
+    run(case, labelled("a", Severity.WARNING))
+    slack.fail = False
+    (outcome,) = run(case, labelled("b", Severity.WARNING))
+    assert outcome.sent == (Channel.SLACK,)
+    assert len(slack.messages) == 2 and len(teams.messages) == 1
+
+
+def test_alerts_of_one_incident_in_one_request_tell_each_channel_once():
+    recorders = {c: Recorder() for c in Channel}
+    run(use_case(POLICY, recorders), *(labelled(p) for p in "abcd"))
+    assert [len(r.messages) for r in recorders.values()] == [1, 1, 1]
+
+
+def test_an_alert_that_fails_to_store_doesnt_stop_the_others(caplog):
+    class Flaky(MemoryIncidents):
+        def save(self, incident):
+            if "fp-bad" in incident.alerts:
+                raise OSError("disk full")
+            super().save(incident)
+
+    recorders = {c: Recorder() for c in Channel}
+    case = use_case(POLICY, recorders, incidents=Flaky())
+    bad = Alert("Disk full", Severity.CRITICAL, {"ns": "shop", "alertname": "Other"},
+                Status.FIRING, datetime.now(UTC), Fingerprint("fp-bad"))
+    good, failed = run(case, labelled("a"), bad)
+    assert good.event == "opened" and len(recorders[Channel.SLACK].messages) == 1
+    assert failed.event == "failed"
+    assert any(r.levelno == logging.ERROR and "Disk full" in r.getMessage() for r in caplog.records)
