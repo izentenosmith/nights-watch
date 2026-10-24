@@ -107,6 +107,12 @@ def unmatched(client: TestClient) -> float:
     raise AssertionError("nightswatch_unmatched_alerts_total is not on /metrics")
 
 
+def assert_no_secrets_in(text: str) -> None:
+    for name in ("NW_SLACK_WEBHOOK_URL", "NW_TEAMS_WEBHOOK_URL", "NW_WHATSAPP_TOKEN",
+                 "NW_WHATSAPP_PHONE_ID", "NW_WHATSAPP_TO", "NW_KNOCK_KNOCK_WHATSAPP_TO"):
+        assert ALL_CHANNELS[name] not in text, name
+
+
 def whatsapp_params(channels: FakeChannels) -> list[str]:
     (body,) = channels.bodies("whatsapp")
     (component,) = body["template"]["components"]
@@ -183,16 +189,36 @@ def test_ac6_unset_referenced_env_vars_stop_startup_naming_file_field_and_variab
     )
     with pytest.raises(StartupError) as error:
         build_app(ALL_CHANNELS | {"NW_SHOP_WHATSAPP_TO": ""}, tmp_path)
-    message = str(error.value)
-    assert "shop.yaml" in message
-    assert "notify.slack.webhook_env" in message and "NW_SHOP_SLACK_WEBHOOK_URL" in message
-    assert "notify.whatsapp.to_env" in message and "NW_SHOP_WHATSAPP_TO" in message
+    lines = [line.strip() for line in str(error.value).splitlines()]
+    assert "shop.yaml notify.slack.webhook_env: NW_SHOP_SLACK_WEBHOOK_URL" in lines
+    assert "shop.yaml notify.whatsapp.to_env: NW_SHOP_WHATSAPP_TO" in lines
 
 
 def test_ac6_the_sample_catalog_needs_its_whatsapp_variable():
     env = {k: v for k, v in ALL_CHANNELS.items() if k != "NW_KNOCK_KNOCK_WHATSAPP_TO"}
     with pytest.raises(StartupError, match="knock-knock.yaml.*NW_KNOCK_KNOCK_WHATSAPP_TO"):
         build_app(env, CATALOG)
+
+
+def test_ac6_a_missing_or_empty_catalog_directory_stops_startup(tmp_path):
+    with pytest.raises(StartupError, match="nowhere"):
+        build_app(ALL_CHANNELS, tmp_path / "nowhere")
+    with pytest.raises(StartupError, match="no apps"):
+        build_app(ALL_CHANNELS, tmp_path)
+
+
+def test_ac6_a_bad_severity_floor_names_the_variable_without_its_value():
+    with pytest.raises(StartupError) as error:
+        build_app(ALL_CHANNELS | {"NW_SLACK_MIN_SEVERITY": "hooks-secret"}, CATALOG)
+    assert "NW_SLACK_MIN_SEVERITY" in str(error.value)
+    assert "hooks-secret" not in str(error.value)
+
+
+def test_ac6_severity_floors_ignore_case(tmp_path):
+    write_app(tmp_path, "shop", {"namespace": "shop"})
+    env = {"NW_SLACK_WEBHOOK_URL": SLACK_URL, "NW_SLACK_MIN_SEVERITY": "Critical"}
+    with running(env, tmp_path) as (client, _):
+        assert app_view(client, "shop")["channels"]["slack"]["min_severity"] == "critical"
 
 
 def test_ac7_channel_with_no_env_vars_is_never_called():
@@ -232,8 +258,7 @@ def test_ac8_one_failing_channel_does_not_stop_the_others_and_is_logged(caplog):
         if r.levelno >= logging.WARNING and "slack" in r.getMessage()
     ]
     assert failures and "knock-knock" in failures[0]
-    for secret in ("slack-secret", "teams-secret", "wa-token"):
-        assert secret not in caplog.text
+    assert_no_secrets_in(caplog.text)
 
 
 def test_ac9_compose_runs_the_app_with_env_and_catalog_on_localhost():
@@ -243,8 +268,11 @@ def test_ac9_compose_runs_the_app_with_env_and_catalog_on_localhost():
     assert "build" in service
     env_files = service["env_file"] if isinstance(service["env_file"], list) else [service["env_file"]]
     assert ".env" in [f["path"] if isinstance(f, dict) else f for f in env_files]
-    assert any(str(v).startswith("./catalog:") for v in service["volumes"])
+    (catalog_mount,) = [v for v in service["volumes"] if str(v).startswith("./catalog:")]
+    assert catalog_mount.split(":")[1] == service["environment"]["NW_CATALOG_DIR"]
     assert service["ports"] == ["127.0.0.1:8000:8000"]
+    ignored = (ROOT / ".dockerignore").read_text().splitlines()
+    assert {"**/.env", "**/.env.*"} <= set(ignored)  # no .env anywhere ends up in the image
 
 
 # --- Channel payloads ----------------------------------------------------------------------
@@ -292,6 +320,18 @@ def test_whatsapp_gets_the_template_with_severity_app_and_title():
     assert body["template"]["language"] == {"code": "en"}
     assert body["template"]["components"][0]["type"] == "body"
     assert whatsapp_params(channels) == ["critical", "knock-knock", "Error rate above 5% on knock-knock"]
+
+
+def test_slack_and_teams_show_the_app_and_the_placeholder_whatever_the_title():
+    with running() as (client, channels):
+        client.post("/alerts/alertmanager", json=alertmanager(
+            alert(knock_knock(), annotations={"summary": "Disk full"})))
+    (slack,) = channels.bodies("slack")
+    (teams,) = channels.bodies("teams")
+    for channel, shown in (("slack", slack["blocks"]), ("teams", teams["attachments"])):
+        text = json.dumps(shown)
+        assert "knock-knock" in text, channel
+        assert "investigation arrives in M1" in text, channel
 
 
 # --- Routing -------------------------------------------------------------------------------
@@ -367,6 +407,39 @@ def test_policy_an_app_destination_wins_over_the_global_one(tmp_path):
 
 def test_policy_whatsapp_without_token_or_phone_id_is_disabled():
     env = {k: v for k, v in ALL_CHANNELS.items() if k != "NW_WHATSAPP_TOKEN"}
+    with running(env) as (client, channels):
+        assert app_view(client, "knock-knock")["channels"]["whatsapp"]["enabled"] is False
+        client.post("/alerts/alertmanager", json=fixture("alertmanager_firing_critical.json"))
+    assert channels.called() == ["slack", "teams"]
+
+
+@pytest.mark.parametrize(
+    "extra_env, severity, expected",
+    [
+        ({}, "critical", ["slack", "teams", "whatsapp"]),
+        ({}, "warning", ["slack", "teams"]),
+        ({"NW_WHATSAPP_MIN_SEVERITY": "warning"}, "warning", ["slack", "teams", "whatsapp"]),
+    ],
+    ids=["default floor: critical", "default floor: warning skipped", "global floor lowered"],
+)
+def test_policy_an_app_without_its_own_whatsapp_settings_uses_the_global_ones(
+    tmp_path, extra_env, severity, expected
+):
+    write_app(tmp_path, "shop", {"namespace": "shop"})
+    with running(ALL_CHANNELS | extra_env, tmp_path) as (client, channels):
+        client.post("/alerts/alertmanager", json=alertmanager(
+            alert({"alertname": "X", "namespace": "shop", "severity": severity})))
+    assert channels.called() == expected
+    for body in channels.bodies("whatsapp"):
+        assert body["to"] == ALL_CHANNELS["NW_WHATSAPP_TO"]
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["NW_WHATSAPP_TOKEN", "NW_WHATSAPP_PHONE_ID", "NW_WHATSAPP_TEMPLATE", "NW_WHATSAPP_TEMPLATE_LANG"],
+)
+def test_policy_whatsapp_needs_every_credential(missing):
+    env = {k: v for k, v in ALL_CHANNELS.items() if k != missing}
     with running(env) as (client, channels):
         assert app_view(client, "knock-knock")["channels"]["whatsapp"]["enabled"] is False
         client.post("/alerts/alertmanager", json=fixture("alertmanager_firing_critical.json"))
@@ -482,10 +555,11 @@ def test_edge_whatsapp_params_are_one_line_and_capped():
 
 @pytest.mark.parametrize(
     "failure",
-    [httpx.ReadTimeout("slow"), httpx.ConnectError("down")],
+    [httpx.ReadTimeout(f"slow: {SLACK_URL}"), httpx.ConnectError(f"cannot reach {SLACK_URL}")],
     ids=["timeout", "connection error"],
 )
 def test_edge_a_transport_failure_is_isolated_like_a_500(failure, caplog):
+    caplog.set_level(logging.INFO)
     with running(fail={"slack": failure}) as (client, channels):
         response = client.post(
             "/alerts/alertmanager", json=fixture("alertmanager_firing_critical.json")
@@ -493,6 +567,7 @@ def test_edge_a_transport_failure_is_isolated_like_a_500(failure, caplog):
     assert response.status_code == 202
     assert channels.called() == ["slack", "teams", "whatsapp"]
     assert any(r.levelno >= logging.WARNING and "slack" in r.getMessage() for r in caplog.records)
+    assert_no_secrets_in(caplog.text)
 
 
 def test_healthz_answers_200():

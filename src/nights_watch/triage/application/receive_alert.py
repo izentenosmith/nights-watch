@@ -37,10 +37,12 @@ class ReceiveAlert:
         router: AlertRouter,
         policy: NotificationPolicy,
         notifiers: Mapping[Channel, Notifier],
+        send_timeout: float = 10.0,
     ):
         self._router = router
         self._policy = policy
         self._notifiers = notifiers
+        self._send_timeout = send_timeout
 
     async def __call__(self, alerts: Iterable[Alert]) -> list[Outcome]:
         """Each alert is handled on its own; all sends run at once."""
@@ -64,6 +66,9 @@ class ReceiveAlert:
 
         message = Message(alert.severity, app, alert.title, alert.starts_at, alert.generator_url)
         deliveries = self._policy.deliveries(app, alert.severity)
+        if not deliveries:
+            log.info("%s alert %r for %s: no enabled channel has a floor that low",
+                     alert.severity, alert.title, app)
         delivered = await asyncio.gather(*(self._send(d, message) for d in deliveries))
         return Outcome(
             alert,
@@ -75,10 +80,19 @@ class ReceiveAlert:
     async def _send(self, delivery: Delivery, message: Message) -> bool:
         """One channel failing never stops the others; the failure is logged without secrets."""
         try:
-            await self._notifiers[delivery.channel].send(message, delivery.destination)
+            async with asyncio.timeout(self._send_timeout):  # in total, whatever the client does
+                await self._notifiers[delivery.channel].send(message, delivery.destination)
             return True
         except Exception as e:  # noqa: BLE001 — an adapter bug mustn't take the others down
-            # only a DeliveryError's text is known to be free of URLs and tokens
-            reason = str(e) if isinstance(e, DeliveryError) else type(e).__name__
-            log.warning("%s: message for %s failed: %s", delivery.channel, message.app, reason)
+            log.warning(
+                "%s: message for %s failed: %s", delivery.channel, message.app, self._reason(e)
+            )
             return False
+
+    def _reason(self, error: Exception) -> str:
+        """Safe to log: only a DeliveryError's text is known to hold no URL or token."""
+        if isinstance(error, TimeoutError):
+            return f"timed out after {self._send_timeout:g}s"
+        if isinstance(error, DeliveryError):
+            return str(error)
+        return type(error).__name__

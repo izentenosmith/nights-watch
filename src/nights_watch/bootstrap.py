@@ -10,11 +10,11 @@ import httpx
 from dotenv import dotenv_values
 from fastapi import FastAPI
 from prometheus_client import CollectorRegistry, Counter
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from nights_watch.api import alerts, health
 from nights_watch.catalog.domain import AlertRouter
-from nights_watch.catalog.yaml_catalog import AppFile, CatalogError, load_catalog
+from nights_watch.catalog.yaml_catalog import AppFile, CatalogError, describe, load_catalog
 from nights_watch.catalog.yaml_catalog import Severity as SeverityName
 from nights_watch.notification.channels.slack import SlackNotifier
 from nights_watch.notification.channels.teams import TeamsNotifier
@@ -52,11 +52,21 @@ class Settings(BaseModel):
     whatsapp_template_lang: str | None = None
     whatsapp_min_severity: SeverityName = "critical"
 
+    @field_validator(
+        "slack_min_severity", "teams_min_severity", "whatsapp_min_severity", mode="before"
+    )
+    @classmethod
+    def _any_case(cls, value: str) -> str:
+        return value.strip().lower()
+
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
-        return cls.model_validate(
-            {k.removeprefix("NW_").lower(): v for k, v in env.items() if k.startswith("NW_")}
-        )
+        try:
+            return cls.model_validate(
+                {k.removeprefix("NW_").lower(): v for k, v in env.items() if k.startswith("NW_")}
+            )
+        except ValidationError as e:
+            raise StartupError(describe(e, lambda loc: f"NW_{str(loc[0]).upper()}")) from None
 
     @property
     def whatsapp_ready(self) -> bool:
@@ -127,12 +137,14 @@ def build_app(
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     """The whole app, from explicit values: tests pass their own env and a fake transport."""
-    env = {k: v for k, v in env.items() if v}  # an empty variable counts as unset
+    env = _set_only(env)
     try:
         catalog = load_catalog(catalog_dir)
-        settings = Settings.from_env(env)
-    except (CatalogError, ValidationError) as e:
-        raise StartupError(str(e)) from e
+    except CatalogError as e:
+        raise StartupError(str(e)) from None
+    if not catalog:
+        raise StartupError(f"no apps in catalog directory {catalog_dir}: nothing to watch")
+    settings = Settings.from_env(env)
     if missing := _unset_references(catalog, env):
         raise StartupError("catalog references unset variables:\n" + "\n".join(missing))
 
@@ -147,7 +159,7 @@ def build_app(
     async def lifespan(app: FastAPI):
         async with httpx.AsyncClient(transport=transport, timeout=SEND_TIMEOUT_SECONDS) as client:
             app.state.receive_alert = ReceiveAlert(
-                AlertRouter(apps), policy, _notifiers(settings, client)
+                AlertRouter(apps), policy, _notifiers(settings, client), SEND_TIMEOUT_SECONDS
             )
             yield
 
@@ -165,8 +177,19 @@ def build_app(
     return app
 
 
+def _set_only(env: Mapping[str, str | None]) -> dict[str, str]:
+    """A blank variable counts as unset."""
+    return {k: v.strip() for k, v in env.items() if v and v.strip()}
+
+
+def read_environment() -> dict[str, str]:
+    """The process environment over .env (when there is one), blank variables dropped from
+    each first, so an empty exported variable doesn't hide a value set in .env."""
+    return _set_only(dotenv_values(".env")) | _set_only(os.environ)
+
+
 def create_app() -> FastAPI:
-    """What uvicorn runs: the process environment, over .env when there is one."""
+    """What uvicorn runs."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    env = {**dotenv_values(".env"), **os.environ}
-    return build_app(env, Path(env.get("NW_CATALOG_DIR") or "catalog"))
+    env = read_environment()
+    return build_app(env, Path(env.get("NW_CATALOG_DIR", "catalog")))

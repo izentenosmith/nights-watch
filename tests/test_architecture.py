@@ -12,13 +12,22 @@ DOMAIN_MODULES = sorted(
 )
 
 
-def imported_modules(path: Path) -> set[str]:
+def imported_modules(path: Path, root: Path = SRC.parent) -> set[str]:
+    """Absolute names of everything the file imports; relative imports are resolved."""
+    package = list(path.relative_to(root).with_suffix("").parts)
+    package = package[:-1]  # the directory: a module's package, or __init__'s own
     modules = set()
     for node in ast.walk(ast.parse(path.read_text())):
         if isinstance(node, ast.Import):
             modules |= {alias.name for alias in node.names}
-        elif isinstance(node, ast.ImportFrom) and node.module:
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
             modules.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            base = package[: len(package) - node.level + 1]
+            if node.module:
+                modules.add(".".join([*base, node.module]))
+            else:
+                modules |= {".".join([*base, alias.name]) for alias in node.names}
     return modules
 
 
@@ -52,4 +61,14 @@ def test_domain_modules_depend_only_on_the_contexts_they_are_allowed_to(path, al
 def test_the_scanner_catches_a_forbidden_import(tmp_path):
     leaky = tmp_path / "domain.py"
     leaky.write_text("import httpx\nfrom fastapi import FastAPI\n")
-    assert imported_modules(leaky) == {"httpx", "fastapi"}
+    assert imported_modules(leaky, root=tmp_path) == {"httpx", "fastapi"}
+
+
+def test_the_scanner_resolves_relative_imports(tmp_path):
+    domain = tmp_path / "nights_watch" / "notification" / "domain.py"
+    domain.parent.mkdir(parents=True)
+    domain.write_text("from ..triage.application import receive_alert\nfrom . import channels\n")
+    assert imported_modules(domain, root=tmp_path) == {
+        "nights_watch.triage.application",
+        "nights_watch.notification.channels",
+    }

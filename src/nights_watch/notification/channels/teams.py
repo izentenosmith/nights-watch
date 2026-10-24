@@ -29,7 +29,7 @@ def render(message: Message) -> dict:
                 "facts": [
                     {"title": "Severity", "value": str(message.severity)},
                     {"title": "App", "value": message.app},
-                    {"title": "Started", "value": f"{message.starts_at:%Y-%m-%d %H:%M %Z}"},
+                    {"title": "Started", "value": f"{message.starts_at:%Y-%m-%d %H:%M UTC}"},
                 ],
             },
             {"type": "TextBlock", "text": PLACEHOLDER, "isSubtle": True, "wrap": True},

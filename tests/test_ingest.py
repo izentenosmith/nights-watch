@@ -74,3 +74,46 @@ def test_a_generic_alert_needs_only_a_title():
 def test_a_generic_alert_needs_a_title():
     with pytest.raises(ValidationError):
         GenericAlert.model_validate({"title": ""})
+
+
+@pytest.mark.parametrize(
+    "annotations, labels, title",
+    [
+        ({"summary": "  "}, {"alertname": "X"}, "X"),
+        ({"summary": " Disk full \n"}, {"alertname": "X"}, "Disk full"),
+        ({"summary": "\n"}, {"alertname": " "}, "unnamed alert"),
+    ],
+)
+def test_a_blank_summary_or_alertname_falls_back(annotations, labels, title):
+    payload = {"alerts": [{"labels": labels, "annotations": annotations}]}
+    (alert,) = AlertmanagerPayload.model_validate(payload).to_alerts()
+    assert alert.title == title
+
+
+def test_a_generic_alert_with_a_blank_title_is_rejected():
+    with pytest.raises(ValidationError):
+        GenericAlert.model_validate({"title": "   "})
+
+
+def test_a_generic_alert_without_severity_takes_the_severity_label():
+    payload = {"title": "X", "labels": {"severity": "critical"}}
+    assert GenericAlert.model_validate(payload).to_alert().severity is Severity.CRITICAL
+
+
+def test_the_severity_field_wins_over_the_label():
+    payload = {"title": "X", "severity": "info", "labels": {"severity": "critical"}}
+    assert GenericAlert.model_validate(payload).to_alert().severity is Severity.INFO
+
+
+@pytest.mark.parametrize(
+    "started_at",
+    ["2026-10-24T03:00:00", "2026-10-24T00:00:00-03:00", "2026-10-24T03:00:00Z"],
+    ids=["naive", "offset", "utc"],
+)
+def test_start_times_are_utc(started_at):
+    alert = GenericAlert.model_validate({"title": "X", "started_at": started_at}).to_alert()
+    assert alert.starts_at == datetime(2026, 10, 24, 3, 0, tzinfo=UTC)
+    assert alert.starts_at.utcoffset().total_seconds() == 0
+    payload = {"alerts": [{"labels": {}, "startsAt": started_at}]}
+    (am,) = AlertmanagerPayload.model_validate(payload).to_alerts()
+    assert am.starts_at.utcoffset().total_seconds() == 0 and am.starts_at.hour == 3

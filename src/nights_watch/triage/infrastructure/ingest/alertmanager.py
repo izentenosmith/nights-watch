@@ -3,12 +3,13 @@
 Unknown fields are ignored on purpose, so Grafana's extras (values, silenceURL, …) pass.
 """
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from nights_watch.triage.domain.alert import Alert, Fingerprint, Severity, Status
+from nights_watch.triage.infrastructure.ingest import utc
 
 
 class _Alert(BaseModel):
@@ -20,15 +21,14 @@ class _Alert(BaseModel):
     fingerprint: str | None = None
 
     def to_alert(self) -> Alert:
-        title = (
-            self.annotations.get("summary") or self.labels.get("alertname") or "unnamed alert"
-        )
+        candidates = (self.annotations.get("summary"), self.labels.get("alertname"))
+        title = next((t.strip() for t in candidates if t and t.strip()), "unnamed alert")
         return Alert(
             title=title,
             severity=Severity.parse(self.labels.get("severity")),
             labels=self.labels,
             status=Status(self.status),
-            starts_at=self.starts_at or datetime.now(UTC),
+            starts_at=utc(self.starts_at),
             fingerprint=Fingerprint(self.fingerprint)
             if self.fingerprint
             else Fingerprint.of(title, self.labels),

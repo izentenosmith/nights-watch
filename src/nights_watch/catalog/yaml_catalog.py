@@ -82,16 +82,31 @@ class AppFile(_Strict):
         return WatchedApp(self.name, LabelMatcher(self.match))
 
 
+def describe(error: ValidationError, name=lambda loc: ".".join(map(str, loc))) -> str:
+    """Where and why, never the rejected value: a value pasted by mistake may be a secret."""
+    return "; ".join(
+        f"{name(e['loc'])}: {e['msg']}" for e in error.errors(include_input=False, include_url=False)
+    )
+
+
 def parse_app_file(path: Path) -> AppFile:
     try:
         return AppFile.model_validate(yaml.safe_load(path.read_text()))
-    except (yaml.YAMLError, ValidationError) as e:
-        raise CatalogError(f"{path.name}: {e}") from e
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        where = f" at line {mark.line + 1}" if mark else ""
+        raise CatalogError(f"{path.name}: invalid YAML{where}") from None
+    except ValidationError as e:
+        raise CatalogError(f"{path.name}: {describe(e)}") from None
 
 
 def load_catalog(directory: Path) -> dict[str, AppFile]:
     """Every <name>.yaml in the directory; files starting with _ (the template) are skipped."""
+    if not directory.is_dir():
+        raise CatalogError(f"catalog directory {directory} does not exist")
     apps = {}
+
+
     for path in sorted(directory.glob("*.yaml")):
         if path.name.startswith("_"):
             continue

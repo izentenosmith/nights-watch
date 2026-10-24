@@ -1,6 +1,6 @@
 # secrets reach the container through compose's env_file, never through the image
-.env
-.env.*
+**/.env
+**/.env.*
 *.kubeconfig
 kubeconfig*
 

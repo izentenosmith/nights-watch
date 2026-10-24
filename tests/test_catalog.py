@@ -142,3 +142,28 @@ def test_an_app_file_becomes_a_watched_app(tmp_path):
     app = load_catalog(tmp_path)["shop"].to_watched_app()
     assert app.name == "shop"
     assert app.matcher.matches({"namespace": "shop", "app": "api", "pod": "x"})
+
+
+@pytest.mark.parametrize(
+    "notify, secret",
+    [
+        ({"slack": {"webhook_env": "https://hooks.slack.com/services/T0/B0/ABCDEFGHIJKLMNOPQRSTUVWX"}},
+         "QRSTUVWX"),
+        ({"whatsapp": {"to_env": "+56912345678"}}, "56912345678"),
+    ],
+    ids=["webhook url", "phone number"],
+)
+def test_a_validation_error_names_the_field_but_never_echoes_the_value(tmp_path, notify, secret):
+    _write(tmp_path, "shop", notify=notify)
+    with pytest.raises(CatalogError) as error:
+        load_catalog(tmp_path)
+    assert "shop.yaml" in str(error.value) and "notify." in str(error.value)
+    assert secret not in str(error.value)
+
+
+def test_a_yaml_syntax_error_doesnt_echo_the_line(tmp_path):
+    (tmp_path / "shop.yaml").write_text("name: shop\nnotify: {slack: {webhook_env: xoxb-SECRET-TOKEN\n")
+    with pytest.raises(CatalogError) as error:
+        load_catalog(tmp_path)
+    assert "shop.yaml" in str(error.value)
+    assert "SECRET" not in str(error.value)
