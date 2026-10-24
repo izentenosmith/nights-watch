@@ -1,0 +1,30 @@
+# Sample app: https://github.com/izentenosmith/knock-knock
+# Selectors assume knock-knock running in k3d (its level 2 on) and emitting
+# telemetry with these labels. knock-knock itself knows nothing about Night's Watch.
+
+name: knock-knock
+owner: izenteno
+description: >
+  React UI behind nginx calls /api/knock; one Service balances four identical,
+  stateless backends (go, python, rust, ts). No database. Each answer carries
+  lang, pod, node, version and took_us.
+
+match:
+  namespace: knock-knock
+
+components:
+  - { name: frontend, selector: { app: knock-frontend } }
+  - { name: go,       selector: { app: knock-go } }
+  - { name: python,   selector: { app: knock-python } }
+  - { name: rust,     selector: { app: knock-rust } }
+  - { name: ts,       selector: { app: knock-ts } }
+
+sources:
+  prometheus: { selector: '{namespace="knock-knock"}' }
+  loki:       { selector: '{namespace="knock-knock"}' }
+  kubernetes: { namespace: knock-knock }
+  github:     { repo: izentenosmith/knock-knock }
+  runbooks:   { path: runbooks/knock-knock }
+
+notify:
+  whatsapp: { to_env: NW_KNOCK_KNOCK_WHATSAPP_TO, min_severity: critical }

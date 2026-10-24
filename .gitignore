@@ -1,0 +1,27 @@
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Env & secrets: values live in .env locally and in GitHub secrets, never in git
+.env
+.env.*
+!.env.example
+*.kubeconfig
+kubeconfig*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Runtime data (incident history, LangGraph checkpoints)
+*.sqlite
+*.sqlite3
+data/
+
+# Logs
+*.log

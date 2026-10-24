@@ -1,0 +1,28 @@
+# Copy to catalog/<app-name>.yaml. The filename must equal `name`.
+# Files starting with _ are never loaded.
+#
+# NEVER put a secret here: fields ending in _env hold an environment variable NAME
+# (NW_...). Values come from .env locally or GitHub secrets in Actions.
+
+name: my-app                     # lowercase, dashes; must match the filename
+owner: my-team
+description: >                   # 2-4 lines for the agent: what "normal" looks like
+  What the app does, how requests flow, what it depends on, what is stateless.
+
+match:                           # an alert belongs to this app when ALL labels match
+  namespace: my-app
+
+components:                      # optional; lets the agent name the failing part
+  - { name: api, selector: { app: my-app-api } }
+
+sources:                         # omit a source the app doesn't have
+  prometheus: { selector: '{namespace="my-app"}' }
+  loki:       { selector: '{namespace="my-app"}' }
+  kubernetes: { namespace: my-app }
+  github:     { repo: owner/my-app }
+  runbooks:   { path: runbooks/my-app }
+
+notify:                          # optional; without it the global NW_* channels apply
+  slack:    { webhook_env: NW_MY_APP_SLACK_WEBHOOK_URL, min_severity: warning }
+  teams:    { webhook_env: NW_MY_APP_TEAMS_WEBHOOK_URL, min_severity: warning }
+  whatsapp: { to_env: NW_MY_APP_WHATSAPP_TO, min_severity: critical }
