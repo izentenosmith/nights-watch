@@ -16,6 +16,7 @@ from nights_watch.triage.domain.incident import (
 
 T0 = datetime(2026, 10, 24, 3, 0, tzinfo=UTC)
 WINDOW = timedelta(minutes=5)
+STALE = timedelta(hours=6)
 
 
 def alert(pod="a", severity=Severity.CRITICAL, alertname="HighErrorRate", title="Error rate up"):
@@ -58,20 +59,20 @@ def test_ids_are_unguessable():
     ids=["inside the window", "at its edge", "past it", "another rule"],
 )
 def test_an_incident_accepts_alerts_of_its_group_inside_the_window(candidate, now, accepted):
-    assert Incident.open(alert(), "shop", T0).accepts(candidate, now, WINDOW) is accepted
+    assert Incident.open(alert(), "shop", T0).accepts(candidate, now, WINDOW, STALE) is accepted
 
 
 def test_the_window_slides_from_the_latest_alert():
     incident = Incident.open(alert("a"), "shop", T0)
     incident.attach(alert("b"), at(4))
-    assert incident.accepts(alert("c"), at(8), WINDOW)
+    assert incident.accepts(alert("c"), at(8), WINDOW, STALE)
     assert incident.last_alert_at == at(4)
 
 
 def test_a_resolved_incident_accepts_nothing():
     incident = Incident.open(alert(), "shop", T0)
     incident.resolve("fp-a", at(1))
-    assert not incident.accepts(alert("b"), at(2), WINDOW)
+    assert not incident.accepts(alert("b"), at(2), WINDOW, STALE)
 
 
 def test_attaching_returns_the_previous_severity_and_the_severity_is_the_highest():
@@ -166,15 +167,15 @@ def test_feedback_after_a_diagnosis_is_kept_and_a_later_vote_replaces_it():
 
 def test_an_alert_still_firing_in_the_incident_is_accepted_whatever_the_window():
     incident = Incident.open(alert("a"), "shop", T0)
-    assert incident.accepts(alert("a"), at(240), WINDOW)  # Alertmanager's 4 h reminder
-    assert not incident.accepts(alert("b"), at(240), WINDOW)
+    assert incident.accepts(alert("a"), at(240), WINDOW, STALE)  # Alertmanager's 4 h reminder
+    assert not incident.accepts(alert("b"), at(240), WINDOW, STALE)
 
 
 def test_an_alert_that_resolved_is_not_kept_past_the_window():
     incident = Incident.open(alert("a"), "shop", T0)
     incident.attach(alert("b"), T0)
     incident.resolve("fp-a", at(1))
-    assert not incident.accepts(alert("a"), at(60), WINDOW)
+    assert not incident.accepts(alert("a"), at(60), WINDOW, STALE)
 
 
 def test_it_knows_which_alerts_are_firing():
@@ -222,3 +223,32 @@ def test_channels_told_are_remembered_and_can_be_released():
     incident.mark_notified({"slack", "teams"})
     incident.unmark_notified({"teams"})
     assert incident.notified == {"slack"}
+
+
+def test_an_alert_not_seen_for_longer_than_stale_after_is_stale_and_not_kept():
+    incident = Incident.open(alert("a"), "shop", T0)
+    assert not incident.is_stale("fp-a", at(6 * 60), STALE)
+    assert incident.is_stale("fp-a", at(6 * 60 + 1), STALE)
+    assert not incident.accepts(alert("a"), at(6 * 60 + 1), WINDOW, STALE)
+
+
+def test_a_resolved_or_unknown_alert_is_never_stale():
+    incident = Incident.open(alert("a"), "shop", T0)
+    incident.attach(alert("b"), T0)
+    incident.resolve("fp-a", at(1))
+    assert not incident.is_stale("fp-a", at(10_000), STALE)
+    assert not incident.is_stale("fp-z", at(10_000), STALE)
+
+
+def test_resolving_an_alert_already_resolved_changes_nothing_while_others_fire():
+    incident = Incident.open(alert("a"), "shop", T0)
+    incident.attach(alert("b"), T0)
+    incident.resolve("fp-a", at(1))
+    assert incident.resolve("fp-a", at(2)) is False
+    assert incident.alerts["fp-a"].last_seen == at(1)
+
+
+def test_accepts_refuses_a_time_without_a_zone():
+    incident = Incident.open(alert("a"), "shop", T0)
+    with pytest.raises(ValueError, match="time zone"):
+        incident.accepts(alert("b"), T0.replace(tzinfo=None), WINDOW, STALE)

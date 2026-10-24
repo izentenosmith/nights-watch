@@ -3,6 +3,7 @@ hears about it once: when it opens, or when its severity rises to the channel's 
 whose message failed is tried again on the incident's next alert. No agent yet (M1b)."""
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -60,6 +61,7 @@ class ReceiveAlert:
         incidents: IncidentRepository,
         lock: asyncio.Lock,
         window: timedelta,
+        stale_after: timedelta,
         clock: Callable[[], datetime],
         run_url: Callable[[str], str],
         send_timeout: float = 10.0,
@@ -72,16 +74,44 @@ class ReceiveAlert:
         # alerts of one group arriving together would open two incidents.
         self._lock = lock
         self._window = window
+        self._stale_after = stale_after
         self._clock = clock
         self._run_url = run_url
         self._send_timeout = send_timeout
 
     async def __call__(self, alerts: Iterable[Alert]) -> list[Outcome]:
-        """Each alert is handled on its own, and one failing doesn't stop the others."""
+        """Each alert is handled on its own, and one failing doesn't stop the others.
+
+        A request is handled in three phases, so the result doesn't depend on the order of the
+        alerts in it: alerts already firing in an incident first (they keep it current), then
+        the other firing alerts (which may join it), then resolves.
+        """
         alerts = list(alerts)
-        results = await asyncio.gather(*(self._receive(a) for a in alerts), return_exceptions=True)
+        phases: list[list[int]] = [[], [], []]
+        for i, alert in enumerate(alerts):
+            phases[self._phase(alert)].append(i)
+        results: list[Outcome | BaseException] = [None] * len(alerts)  # type: ignore[list-item]
+        for phase in phases:
+            done = await asyncio.gather(
+                *(self._receive(alerts[i]) for i in phase), return_exceptions=True
+            )
+            for i, result in zip(phase, done):
+                results[i] = result
         return [self._failed(a, r) if isinstance(r, Exception) else r
                 for a, r in zip(alerts, results)]
+
+    def _phase(self, alert: Alert) -> int:
+        if alert.status is Status.RESOLVED:
+            return 2
+        # A lookup that fails here fails again in _receive, which reports it.
+        with contextlib.suppress(Exception):
+            candidates = self._router.candidates(alert.labels)
+            if candidates:
+                fingerprint = alert.fingerprint.value
+                incident = self._incidents.find_firing(candidates[0].name, fingerprint)
+                if incident and not incident.is_stale(fingerprint, self._clock(), self._stale_after):
+                    return 0
+        return 1
 
     def _failed(self, alert: Alert, error: Exception) -> Outcome:
         log.error("alert %r couldn't be handled: %s", alert.title, type(error).__name__)
@@ -116,10 +146,14 @@ class ReceiveAlert:
 
     async def _release(self, incident_id: str, channels: tuple[Channel, ...]) -> None:
         """A channel whose message failed hasn't been told: the incident's next alert retries."""
-        async with self._lock:
-            incident = self._incidents.get(incident_id)
-            incident.unmark_notified({str(c) for c in channels})
-            self._incidents.save(incident)
+        try:
+            async with self._lock:
+                incident = self._incidents.get(incident_id)
+                incident.unmark_notified({str(c) for c in channels})
+                self._incidents.save(incident)
+        except Exception as e:  # noqa: BLE001 — the sends happened; report them all the same
+            log.error("couldn't release %s on incident %s for a retry: %s",
+                      ", ".join(map(str, channels)), incident_id, type(e).__name__)
 
     def _route(self, alert: Alert) -> str | None:
         candidates = self._router.candidates(alert.labels)
@@ -139,9 +173,17 @@ class ReceiveAlert:
 
     def _open_or_attach(self, alert: Alert, app: str) -> tuple[Incident, Event, list[Delivery]]:
         now = self._clock()
-        incident = (self._incidents.find_firing(app, alert.fingerprint.value)
-                    or self._incidents.find_open(app, group_key_of(alert)))
-        if incident is not None and incident.accepts(alert, now, self._window):
+        fingerprint = alert.fingerprint.value
+        holder = self._incidents.find_firing(app, fingerprint)
+        if holder is not None and holder.is_stale(fingerprint, now, self._stale_after):
+            # Not re-sent for too long: its resolve was lost. Let it go, then treat it as new.
+            holder.resolve(fingerprint, now)
+            self._incidents.save(holder)
+            log.info("alert %r went stale in incident %s; marked resolved there", alert.title,
+                     holder.id)
+            holder = None
+        incident = holder or self._incidents.find_open(app, group_key_of(alert))
+        if incident is not None and incident.accepts(alert, now, self._window, self._stale_after):
             previous = incident.attach(alert, now)
             event = Event.ESCALATED if incident.severity > previous else Event.ATTACHED
         else:

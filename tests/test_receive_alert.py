@@ -3,6 +3,8 @@ import logging
 import time
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from nights_watch.catalog.domain import AlertRouter, LabelMatcher, WatchedApp
 from nights_watch.notification.domain import Channel, ChannelSettings, NotificationPolicy
 from nights_watch.triage.application.receive_alert import ReceiveAlert
@@ -39,6 +41,7 @@ def use_case(policy, notifiers, **kwargs):
         "incidents": MemoryIncidents(),
         "lock": asyncio.Lock(),
         "window": timedelta(minutes=5),
+        "stale_after": timedelta(hours=6),
         "clock": lambda: datetime.now(UTC),
         "run_url": lambda run_id: f"https://nw.test/runs/{run_id}",
     }
@@ -163,3 +166,62 @@ def test_an_alert_that_fails_to_store_doesnt_stop_the_others(caplog):
     assert good.event == "opened" and len(recorders[Channel.SLACK].messages) == 1
     assert failed.event == "failed"
     assert any(r.levelno == logging.ERROR and "Disk full" in r.getMessage() for r in caplog.records)
+
+
+class Clock:
+    def __init__(self):
+        self.now = datetime(2026, 10, 24, 3, 0, tzinfo=UTC)
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, **delta):
+        self.now += timedelta(**delta)
+
+
+@pytest.mark.parametrize("order", ["new pod first", "refresh first"])
+def test_a_new_pod_joins_when_its_sibling_refreshes_in_the_same_request(order):
+    clock, incidents = Clock(), MemoryIncidents()
+    case = use_case(POLICY, {c: Recorder() for c in Channel}, clock=clock, incidents=incidents)
+    (first,) = run(case, labelled("a"))
+    clock.advance(minutes=30)  # past the window, but a is still firing
+    batch = [labelled("b"), labelled("a")] if order == "new pod first" else [labelled("a"), labelled("b")]
+    outcomes = run(case, *batch)
+    assert {o.incident_id for o in outcomes} == {first.incident_id}
+
+
+@pytest.mark.parametrize("order", ["resolve first", "new pod first"])
+def test_a_rolling_restart_in_one_request_keeps_the_incident(order):
+    clock, incidents = Clock(), MemoryIncidents()
+    case = use_case(POLICY, {c: Recorder() for c in Channel}, clock=clock, incidents=incidents)
+    (first,) = run(case, labelled("a"))
+    clock.advance(minutes=1)
+    gone, new = labelled("a", status=Status.RESOLVED), labelled("b")
+    outcomes = run(case, *([gone, new] if order == "resolve first" else [new, gone]))
+    assert {o.incident_id for o in outcomes} == {first.incident_id}
+    assert str(incidents.get(first.incident_id).status) == "open"
+
+
+def test_an_alert_not_re_sent_for_too_long_opens_a_new_incident_and_the_old_lets_it_go():
+    clock, incidents = Clock(), MemoryIncidents()
+    recorders = {c: Recorder() for c in Channel}
+    case = use_case(POLICY, recorders, clock=clock, incidents=incidents,
+                    stale_after=timedelta(hours=6))
+    (first,) = run(case, labelled("a"))
+    clock.advance(hours=7)
+    (again,) = run(case, labelled("a"))
+    assert again.event == "opened" and again.incident_id != first.incident_id
+    assert str(incidents.get(first.incident_id).status) == "resolved"
+    assert len(recorders[Channel.SLACK].messages) == 2
+
+
+def test_a_release_that_fails_is_logged_and_the_outcome_keeps_its_details(caplog):
+    class NoReload(MemoryIncidents):
+        def get(self, incident_id):
+            raise OSError("disk gone")
+
+    case = use_case(POLICY, {Channel.SLACK: Recorder(fail=True), Channel.TEAMS: Recorder(),
+                             Channel.WHATSAPP: Recorder()}, incidents=NoReload())
+    (outcome,) = run(case, labelled("a"))
+    assert outcome.event == "opened" and outcome.failed == (Channel.SLACK,)
+    assert any(r.levelno == logging.ERROR and "release" in r.getMessage() for r in caplog.records)

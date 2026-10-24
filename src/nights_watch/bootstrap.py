@@ -64,6 +64,7 @@ class Settings(BaseModel):
     whatsapp_template_lang: str | None = None
     whatsapp_min_severity: SeverityName = "critical"
     group_window: int = Field(900, ge=1, le=7 * 24 * 3600)  # seconds
+    alert_stale_after: int = Field(21600, ge=60, le=30 * 24 * 3600)  # seconds
     db_path: Path = Path("data/nightswatch.sqlite")
     public_url: str = "http://localhost:8000"
 
@@ -77,9 +78,20 @@ class Settings(BaseModel):
     @field_validator("public_url")
     @classmethod
     def _absolute_http_url(cls, value: str) -> str:
-        url = urlsplit(value)
-        if url.scheme not in ("http", "https") or not url.netloc:
-            raise ValueError("must be an absolute http(s) URL, e.g. https://nightswatch.example.com")
+        # Every message links here, so it must be a plain address: no credentials, query or
+        # fragment. The error never quotes the value (urlsplit's own errors would).
+        try:
+            url = urlsplit(value)
+            _ = url.port  # raises on a port that isn't a number
+            plain = (url.scheme in ("http", "https") and url.hostname and not url.username
+                     and not url.password and not url.query and not url.fragment
+                     and value == value.strip() and " " not in value)
+        except ValueError:
+            plain = False
+        if not plain:
+            raise ValueError(
+                "must be a plain absolute http(s) URL, e.g. https://nightswatch.example.com"
+            )
         return value
 
     @classmethod
@@ -196,6 +208,7 @@ def build_app(
                 AlertRouter(apps), policy, _notifiers(settings, client),
                 incidents=incidents, lock=lock,
                 window=timedelta(seconds=settings.group_window),
+                stale_after=timedelta(seconds=settings.alert_stale_after),
                 clock=clock or (lambda: datetime.now(UTC)),
                 run_url=settings.run_url, send_timeout=send_timeout,
             )

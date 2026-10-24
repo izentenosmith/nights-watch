@@ -42,8 +42,8 @@ class FakeClock:
 
 
 @contextmanager
-def watching(db: Path | None = None, clock: FakeClock | None = None, **build):
-    env = ALL_CHANNELS | {"NW_PUBLIC_URL": PUBLIC_URL}
+def watching(db: Path | None = None, clock: FakeClock | None = None, env=None, **build):
+    env = ALL_CHANNELS | {"NW_PUBLIC_URL": PUBLIC_URL} | (env or {})
     if db is not None:
         env |= {"NW_DB_PATH": str(db)}
     clock = clock or FakeClock()
@@ -95,6 +95,8 @@ def test_a_firing_alert_opens_an_incident_linked_from_every_message():
     assert channels.called() == ["slack", "teams", "whatsapp"]
     assert (field(html, "app"), field(html, "severity"), field(html, "status")) == (
         "knock-knock", "critical", "open")
+    (slack,) = channels.bodies("slack")
+    assert "Escalated" not in json.dumps(slack)  # an opening isn't an escalation
     assert "Error rate above 5% on knock-knock" in html and "fp-a" in html
 
 
@@ -225,6 +227,8 @@ def test_a_resolve_for_an_alert_no_incident_holds_is_ignored(caplog):
         post(client, pod("z", status="resolved"))
         assert unmatched(client) == 0
         post(client, pod("y"))  # had the resolve created an incident, this would attach to it
+        (run_id,) = run_ids(channels)
+        assert "fp-z" not in page(client, run_id)
     assert channels.called() == ["slack", "teams", "whatsapp"]
     assert any("ignored" in r.getMessage() and "knock-knock" in r.getMessage()
                for r in caplog.records)
@@ -293,6 +297,7 @@ def test_a_channel_that_failed_hears_about_the_incident_on_its_next_alert():
         clock.advance(30)
         post(client, pod("b", "warning"))
     assert channels.called() == ["slack", "slack", "teams"]
+    assert set(run_ids(channels, "slack")) == set(run_ids(channels, "teams"))  # the same run
 
 
 def test_a_severity_that_drops_and_rises_again_pages_no_one_twice():
@@ -329,11 +334,86 @@ def test_text_that_isnt_valid_unicode_is_rejected_with_422():
 @pytest.mark.parametrize(
     "name, value",
     [("NW_GROUP_WINDOW", "100000000000000"), ("NW_GROUP_WINDOW", "0"),
-     ("NW_PUBLIC_URL", "nightswatch.example.com"), ("NW_PUBLIC_URL", "ftp://x")],
+     ("NW_ALERT_STALE_AFTER", "0"), ("NW_ALERT_STALE_AFTER", "100000000000000"),
+     ("NW_PUBLIC_URL", "nightswatch.example.com"), ("NW_PUBLIC_URL", "ftp://x"),
+     ("NW_PUBLIC_URL", "https://ops:s3cret@nw.example.com"),
+     ("NW_PUBLIC_URL", "https://ops:s3cr\u2100t@nw.example.com"),
+     ("NW_PUBLIC_URL", "http://[s3cret]/"), ("NW_PUBLIC_URL", "http://:8000"),
+     ("NW_PUBLIC_URL", "http://nw.example.com:port"), ("NW_PUBLIC_URL", "https://nw.example.com/?a=1"),
+     ("NW_PUBLIC_URL", "https://nw.example.com/#x")],
 )
 def test_bad_incident_settings_stop_startup_naming_the_variable(name, value):
-    with pytest.raises(StartupError, match=name):
+    with pytest.raises(StartupError, match=name) as error:
         build_app(ALL_CHANNELS | {name: value}, CATALOG)
+    assert "s3cr" not in str(error.value)
+
+
+def test_a_public_url_with_a_path_prefix_is_fine():
+    with watching(env={"NW_PUBLIC_URL": "https://example.com/nw/"}) as (client, channels, _):
+        post(client, pod("a"))
+    (slack,) = channels.bodies("slack")
+    assert re.search(r"https://example\.com/nw/runs/[0-9a-f]{32}", json.dumps(slack))
+
+
+def test_the_group_window_is_configurable():
+    with watching(env={"NW_GROUP_WINDOW": "60"}) as (client, channels, clock):
+        post(client, pod("a"))
+        clock.advance(61)
+        post(client, pod("b"))
+    assert len(run_ids(channels)) == 2
+
+
+def test_a_repeated_generic_alert_pages_again_once_its_incident_has_gone_stale():
+    generic = {"title": "Backup failed", "severity": "critical",
+               "labels": {"namespace": "knock-knock"}}
+    with watching() as (client, channels, clock):
+        assert client.post("/alerts/generic", json=generic).status_code == 202
+        clock.advance(3600)
+        client.post("/alerts/generic", json=generic)  # within NW_ALERT_STALE_AFTER: same incident
+        assert len(run_ids(channels)) == 1
+        clock.advance(7 * 3600)
+        client.post("/alerts/generic", json=generic)
+        first, second = run_ids(channels)
+        assert status_on(page(client, first)) == "resolved"
+        assert status_on(page(client, second)) == "open"
+
+
+def test_one_alert_failing_to_store_answers_500_and_the_others_still_page(monkeypatch):
+    from nights_watch.triage.infrastructure import sqlite_incidents
+
+    original = sqlite_incidents.SqliteIncidents.save
+
+    def save(self, incident):
+        if "fp-bad" in incident.alerts:
+            raise OSError("disk full")
+        original(self, incident)
+
+    monkeypatch.setattr(sqlite_incidents.SqliteIncidents, "save", save)
+    bad = alert(knock_knock(alertname="Other"))
+    bad["fingerprint"] = "fp-bad"
+    with watching() as (client, channels, _):
+        response = client.post("/alerts/alertmanager", json=alertmanager(bad, pod("a")))
+        assert response.status_code == 500
+        assert channels.called() == ["slack", "teams", "whatsapp"]
+        post(client, pod("b"))  # the next request still works: nothing was left locked
+
+
+def test_text_that_isnt_valid_unicode_is_rejected_on_the_generic_route_too():
+    body = json.dumps({"title": "\ud800", "labels": {"namespace": "knock-knock"}})
+    with watching() as (client, channels, _):
+        response = client.post("/alerts/generic", content=body,
+                               headers={"content-type": "application/json"})
+    assert response.status_code == 422
+    assert channels.called() == []
+
+
+def test_a_payload_nested_too_deep_to_check_is_a_422():
+    body = '{"alerts": ' + "[" * 5000 + "]" * 5000 + "}"
+    with watching() as (client, channels, _):
+        response = client.post("/alerts/alertmanager", content=body,
+                               headers={"content-type": "application/json"})
+    assert response.status_code in (400, 422)
+    assert channels.called() == []
 
 
 def test_a_reminder_goes_to_the_incident_where_the_alert_fires_not_the_newest():

@@ -45,4 +45,6 @@ class Payload(BaseModel):
             _assert_utf8(data)
         except UnicodeEncodeError:
             raise ValueError("payload holds text that isn't valid Unicode") from None
+        except RecursionError:
+            raise ValueError("payload is nested too deeply") from None
         return data

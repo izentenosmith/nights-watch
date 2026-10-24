@@ -90,11 +90,11 @@ def test_find_firing_finds_the_unresolved_incident_where_that_alert_fires(reposi
 
 
 def test_times_in_other_zones_come_back_as_the_same_moment_and_sort_right(repository):
-    santiago = timezone(timedelta(hours=-3))
-    earlier = Incident.open(alert("a"), "shop", T0.astimezone(santiago))  # 00:00 -03:00
-    later = Incident.open(alert("b"), "shop", at(1))  # 03:01 UTC
-    repository.save(later)
+    moscow = timezone(timedelta(hours=3))
+    earlier = Incident.open(alert("a"), "shop", T0.astimezone(moscow))  # "06:00+03:00": sorts
+    later = Incident.open(alert("b"), "shop", at(1))  # after "03:01+00:00" as text, not in time
     repository.save(earlier)
+    repository.save(later)
     assert repository.get(earlier.id).opened_at == T0
     assert repository.find_open("shop", "HighErrorRate").id == later.id
 
@@ -123,3 +123,10 @@ def test_sqlite_finishes_a_schema_a_crash_left_half_made(tmp_path):
     incident = Incident.open(alert(), "shop", T0)
     SqliteIncidents(path).save(incident)
     assert SqliteIncidents(path).get(incident.id) == incident
+
+
+def test_sqlite_stamps_a_new_database_with_its_schema_version(tmp_path):
+    path = tmp_path / "nw.sqlite"
+    SqliteIncidents(path)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1

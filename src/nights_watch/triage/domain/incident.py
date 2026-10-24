@@ -1,8 +1,8 @@
 """Incident: one problem in one watched app, made of the alerts that belong to it.
 
 Alerts of the same rule (the same group) for the same app share an incident while they keep
-coming within the grouping window; an alert still firing in it always stays with it. The incident
-resolves once every one of its alerts has.
+coming within the grouping window; an alert still firing in it stays with it while it keeps being
+re-sent (it isn't stale). The incident resolves once every one of its alerts has.
 """
 
 import uuid
@@ -94,13 +94,22 @@ class Incident:
         record = self.alerts.get(fingerprint)
         return record is not None and record.firing
 
-    def accepts(self, alert: Alert, now: datetime, window: timedelta) -> bool:
-        """Same group, not resolved, and either the alert is still firing here or it arrives
-        within the window of the latest alert."""
+    def is_stale(self, fingerprint: str, now: datetime, stale_after: timedelta) -> bool:
+        """Firing here but not seen for longer than stale_after: its resolve was probably lost."""
+        return self.firing(fingerprint) and now - self.alerts[fingerprint].last_seen > stale_after
+
+    def accepts(
+        self, alert: Alert, now: datetime, window: timedelta, stale_after: timedelta
+    ) -> bool:
+        """Same group, not resolved, and either the alert is still firing here (and not stale) or
+        it arrives within the window of the latest alert."""
+        _aware(now)
+        fingerprint = alert.fingerprint.value
+        still_here = self.firing(fingerprint) and not self.is_stale(fingerprint, now, stale_after)
         return (
             self.status is not IncidentStatus.RESOLVED
             and group_key_of(alert) == self.group_key
-            and (self.firing(alert.fingerprint.value) or now - self.last_alert_at <= window)
+            and (still_here or now - self.last_alert_at <= window)
         )
 
     def attach(self, alert: Alert, now: datetime) -> Severity | None:
@@ -129,9 +138,9 @@ class Incident:
         _aware(now)
         if fingerprint not in self.alerts:
             raise UnknownAlert(fingerprint)
-        if self.status is IncidentStatus.RESOLVED:
-            return False
         record = self.alerts[fingerprint]
+        if self.status is IncidentStatus.RESOLVED or not record.firing:
+            return False
         record.firing, record.last_seen = False, now
         if any(r.firing for r in self.alerts.values()):
             return False
