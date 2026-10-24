@@ -78,7 +78,7 @@ class ReceiveAlert:
 
     def _log_undelivered(self, alert: Alert, app: str) -> None:
         if not any(view.enabled for view in self._policy.view(app).values()):
-            log.warning("%s alert %r for %s dropped: no channel is configured for %s",
+            log.warning("%s alert %r for %s dropped: no channel is enabled for %s (see GET /apps)",
                         alert.severity, alert.title, app, app)
         else:
             log.info("%s alert %r for %s: no enabled channel has a floor that low",

@@ -30,6 +30,10 @@ from nights_watch.triage.application.receive_alert import ReceiveAlert
 from nights_watch.triage.domain.alert import Severity
 
 SEND_TIMEOUT_SECONDS = 10.0
+WHATSAPP_CREDENTIALS = ("whatsapp_token", "whatsapp_phone_id", "whatsapp_template",
+                        "whatsapp_template_lang")
+
+log = logging.getLogger(__name__)
 
 
 class StartupError(Exception):
@@ -72,10 +76,10 @@ class Settings(BaseModel):
     @property
     def whatsapp_ready(self) -> bool:
         """Everything WhatsApp needs besides the recipient."""
-        return all(
-            (self.whatsapp_token, self.whatsapp_phone_id, self.whatsapp_template,
-             self.whatsapp_template_lang)
-        )
+        return not self.missing_whatsapp_credentials()
+
+    def missing_whatsapp_credentials(self) -> list[str]:
+        return [f"NW_{name.upper()}" for name in WHATSAPP_CREDENTIALS if not getattr(self, name)]
 
     def channels(self) -> dict[Channel, ChannelSettings]:
         return {
@@ -147,6 +151,9 @@ def build_app(
     if not catalog:
         raise StartupError(f"no apps in catalog directory {catalog_dir}: nothing to watch")
     settings = Settings.from_env(env)
+    missing = settings.missing_whatsapp_credentials()
+    if 0 < len(missing) < len(WHATSAPP_CREDENTIALS):
+        log.warning("whatsapp is disabled: partly configured, missing %s", ", ".join(missing))
     if missing := _unset_references(catalog, env):
         raise StartupError("catalog references unset variables:\n" + "\n".join(missing))
 

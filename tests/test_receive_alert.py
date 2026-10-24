@@ -66,7 +66,7 @@ def test_an_alert_for_an_app_with_no_channel_configured_is_a_warning(caplog):
     asyncio.run(ReceiveAlert(ROUTER, unconfigured, {})([alert()]))
     (record,) = [r for r in caplog.records if "Disk full" in r.getMessage()]
     assert record.levelno == logging.WARNING
-    assert "no channel is configured" in record.getMessage()
+    assert "no channel is enabled" in record.getMessage()
 
 
 def test_a_single_match_logs_no_routing_warning(caplog):

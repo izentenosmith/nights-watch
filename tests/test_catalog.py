@@ -148,9 +148,14 @@ def test_an_app_file_becomes_a_watched_app(tmp_path):
 def everything_printed_about(error: BaseException) -> str:
     """The error's text, its formatted traceback, and every exception chained to it."""
     printed = "".join(traceback.format_exception(error))
-    while error is not None:
-        printed += repr(error) + str(error)
-        error = error.__cause__ or error.__context__
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        printed += repr(current) + str(current)
+        pending += [current.__cause__, current.__context__]
     return printed
 
 
@@ -171,16 +176,43 @@ def test_a_validation_error_names_the_field_but_never_echoes_the_value(tmp_path,
     assert secret not in everything_printed_about(error.value)
 
 
-def test_a_secret_pasted_as_a_key_is_not_echoed(tmp_path):
-    secret = "https://hooks.slack.com/services/T0/B0/PASTEDKEY"
-    (tmp_path / "shop.yaml").write_text(
-        "name: shop\nowner: t\ndescription: d\nmatch: {a: b}\nsources: {}\n"
-        f"notify:\n  slack:\n    {secret}:\n"
-    )
+def test_a_typo_in_a_key_is_named(tmp_path):
+    _write(tmp_path, "shop", notify={"slack": {"min-severity": "warning"}})
+    with pytest.raises(CatalogError, match=r"notify\.slack\.min-severity: Extra inputs"):
+        load_catalog(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["!!int xoxbSECRET123", "!!bool hooks-SECRET", "!!float", "!!timestamp SECRET-13-01"],
+)
+def test_a_value_yaml_cant_construct_is_named_without_its_content(tmp_path, value):
+    _write(tmp_path, "shop")
+    path = tmp_path / "shop.yaml"
+    path.write_text(path.read_text() + f"extra: {value}\n")
     with pytest.raises(CatalogError) as error:
         load_catalog(tmp_path)
-    assert "shop.yaml" in str(error.value) and "notify.slack" in str(error.value)
-    assert "PASTEDKEY" not in everything_printed_about(error.value)
+    assert str(error.value).startswith("shop.yaml: ")
+    assert "SECRET" not in everything_printed_about(error.value)
+
+
+def test_an_impossible_date_is_named(tmp_path):
+    _write(tmp_path, "shop")
+    path = tmp_path / "shop.yaml"
+    path.write_text(path.read_text().replace("description: an app", "description: 2024-13-01"))
+    with pytest.raises(CatalogError, match="^shop.yaml: "):
+        load_catalog(tmp_path)
+
+
+def test_an_unreadable_catalog_directory_says_so(tmp_path):
+    locked = tmp_path / "catalog"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        with pytest.raises(CatalogError, match="can't be read"):
+            load_catalog(locked)
+    finally:
+        locked.chmod(0o755)
 
 
 @pytest.mark.parametrize(

@@ -214,7 +214,7 @@ def test_ac6_the_sample_catalog_needs_its_whatsapp_variable():
 
 
 def test_ac6_a_missing_or_empty_catalog_directory_stops_startup(tmp_path):
-    with pytest.raises(StartupError, match="does not exist"):
+    with pytest.raises(StartupError, match="nowhere does not exist"):
         build_app(ALL_CHANNELS, tmp_path / "nowhere")
     with pytest.raises(StartupError, match="no apps"):
         build_app(ALL_CHANNELS, tmp_path)
@@ -238,10 +238,12 @@ def test_ac6_a_catalog_error_stops_startup_without_echoing_the_value(tmp_path):
     with pytest.raises(StartupError) as error:
         build_app(ALL_CHANNELS, tmp_path)
     assert "shop.yaml" in str(error.value)
-    printed, chained = "".join(traceback.format_exception(error.value)), error.value
-    while chained is not None:
-        printed += repr(chained)
-        chained = chained.__cause__ or chained.__context__
+    printed, pending = "".join(traceback.format_exception(error.value)), [error.value]
+    while pending:
+        chained = pending.pop()
+        if chained is not None:
+            printed += repr(chained) + str(chained)
+            pending += [chained.__cause__, chained.__context__]
     assert "CATALOGSECRET" not in printed
 
 
@@ -304,7 +306,7 @@ def test_ac9_compose_runs_the_app_with_env_and_catalog_on_localhost():
     assert service["ports"] == ["127.0.0.1:8000:8000"]
     ignored = [line.strip() for line in (ROOT / ".dockerignore").read_text().splitlines()]
     assert {"**/.env", "**/.env.*", "**/*.env"} <= set(ignored)  # no env file in the image
-    assert not [line for line in ignored if line.startswith("!") and "env" in line]
+    assert not [line for line in ignored if line.startswith("!")]  # nothing re-included
 
 
 # --- Channel payloads ----------------------------------------------------------------------
@@ -466,6 +468,14 @@ def test_policy_an_app_without_its_own_whatsapp_settings_uses_the_global_ones(
         assert body["to"] == ALL_CHANNELS["NW_WHATSAPP_TO"]
 
 
+def test_policy_a_partly_configured_whatsapp_is_named_at_startup(caplog):
+    env = {k: v for k, v in ALL_CHANNELS.items() if k != "NW_WHATSAPP_TEMPLATE"}
+    build_app(env, CATALOG)
+    (warning,) = [r.getMessage() for r in caplog.records if "whatsapp" in r.getMessage()]
+    assert "NW_WHATSAPP_TEMPLATE" in warning and "disabled" in warning
+    assert_no_secrets_in(caplog.text)
+
+
 @pytest.mark.parametrize(
     "missing",
     ["NW_WHATSAPP_TOKEN", "NW_WHATSAPP_PHONE_ID", "NW_WHATSAPP_TEMPLATE", "NW_WHATSAPP_TEMPLATE_LANG"],
@@ -620,7 +630,15 @@ def test_edge_a_channel_slower_than_the_send_timeout_doesnt_hold_the_response(ca
     assert response.status_code == 202
     assert elapsed < 1.5
     assert channels.called() == ["slack", "teams", "whatsapp"]
-    assert any("slack" in r.getMessage() and "timed out" in r.getMessage() for r in caplog.records)
+    failures = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(failures) == 1 and "slack" in failures[0] and "timed out" in failures[0]
+
+
+def test_edge_the_send_timeout_also_bounds_each_http_phase():
+    with running(send_timeout=0.3) as (client, channels):
+        client.post("/alerts/alertmanager", json=fixture("alertmanager_firing_critical.json"))
+    for request in channels.requests:
+        assert set(request.extensions["timeout"].values()) == {0.3}
 
 
 def test_healthz_answers_200():
