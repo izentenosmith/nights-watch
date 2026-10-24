@@ -248,11 +248,12 @@ def test_a_database_with_an_unknown_schema_version_stops_startup(tmp_path):
 
 def test_the_new_settings_are_in_env_example_with_their_defaults():
     lines = (ROOT / ".env.example").read_text().splitlines()
-    for line in ("NW_GROUP_WINDOW=900", "NW_DB_PATH=data/nightswatch.sqlite",
-                 "NW_PUBLIC_URL=http://localhost:8000"):
+    for line in ("NW_GROUP_WINDOW=900", "NW_ALERT_STALE_AFTER=86400",
+                 "NW_DB_PATH=data/nightswatch.sqlite", "NW_PUBLIC_URL=http://localhost:8000"):
         assert line in lines
-    window_comment = lines[lines.index("NW_GROUP_WINDOW=900") - 1]
-    assert "group_interval" in window_comment
+    assert "group_interval" in lines[lines.index("NW_GROUP_WINDOW=900") - 1]
+    assert "repeat_interval" in lines[lines.index("NW_ALERT_STALE_AFTER=86400") - 1]
+    assert not any("always stays" in line for line in lines)
 
 
 def test_the_container_keeps_the_database_on_a_named_volume_with_one_worker():
@@ -340,7 +341,11 @@ def test_text_that_isnt_valid_unicode_is_rejected_with_422():
      ("NW_PUBLIC_URL", "https://ops:s3cr\u2100t@nw.example.com"),
      ("NW_PUBLIC_URL", "http://[s3cret]/"), ("NW_PUBLIC_URL", "http://:8000"),
      ("NW_PUBLIC_URL", "http://nw.example.com:port"), ("NW_PUBLIC_URL", "https://nw.example.com/?a=1"),
-     ("NW_PUBLIC_URL", "https://nw.example.com/#x")],
+     ("NW_PUBLIC_URL", "https://nw.example.com/#x"), ("NW_PUBLIC_URL", "https://nw.example.com?"),
+     ("NW_PUBLIC_URL", "https://nw.example.com/#"), ("NW_PUBLIC_URL", "https://nights\twatch.example"),
+     ("NW_PUBLIC_URL", "https://nw.example.com/a b"), ("NW_PUBLIC_URL", "https://evil.example\\nw.ex"),
+     ("NW_PUBLIC_URL", "https://nw.example.com/a|b"), ("NW_PUBLIC_URL", "http://nw.example.com:0"),
+     ("NW_PUBLIC_URL", "http://@nw.example.com")],
 )
 def test_bad_incident_settings_stop_startup_naming_the_variable(name, value):
     with pytest.raises(StartupError, match=name) as error:
@@ -369,10 +374,10 @@ def test_a_repeated_generic_alert_pages_again_once_its_incident_has_gone_stale()
     with watching() as (client, channels, clock):
         assert client.post("/alerts/generic", json=generic).status_code == 202
         clock.advance(3600)
-        client.post("/alerts/generic", json=generic)  # within NW_ALERT_STALE_AFTER: same incident
-        assert len(run_ids(channels)) == 1
-        clock.advance(7 * 3600)
-        client.post("/alerts/generic", json=generic)
+        refresh = client.post("/alerts/generic", json=generic)  # within the stale limit
+        assert refresh.status_code == 202 and len(run_ids(channels)) == 1
+        clock.advance(25 * 3600)  # past the default NW_ALERT_STALE_AFTER (24 h)
+        assert client.post("/alerts/generic", json=generic).status_code == 202
         first, second = run_ids(channels)
         assert status_on(page(client, first)) == "resolved"
         assert status_on(page(client, second)) == "open"
@@ -412,7 +417,7 @@ def test_a_payload_nested_too_deep_to_check_is_a_422():
     with watching() as (client, channels, _):
         response = client.post("/alerts/alertmanager", content=body,
                                headers={"content-type": "application/json"})
-    assert response.status_code in (400, 422)
+    assert response.status_code == 422
     assert channels.called() == []
 
 
@@ -427,3 +432,19 @@ def test_a_reminder_goes_to_the_incident_where_the_alert_fires_not_the_newest():
         post(client, pod("a", status="resolved"))
         assert status_on(page(client, first)) == "resolved"
         assert "fp-a" not in page(client, second)
+
+
+def test_the_stale_limit_is_configurable():
+    generic = {"title": "Backup failed", "severity": "critical",
+               "labels": {"namespace": "knock-knock"}}
+    with watching(env={"NW_ALERT_STALE_AFTER": "3600"}) as (client, channels, clock):
+        client.post("/alerts/generic", json=generic)
+        clock.advance(2 * 3600)
+        client.post("/alerts/generic", json=generic)
+    assert len(run_ids(channels)) == 2
+
+
+def test_a_stale_limit_not_above_the_window_stops_startup():
+    env = ALL_CHANNELS | {"NW_GROUP_WINDOW": "900", "NW_ALERT_STALE_AFTER": "900"}
+    with pytest.raises(StartupError, match="NW_ALERT_STALE_AFTER.*NW_GROUP_WINDOW"):
+        build_app(env, CATALOG)

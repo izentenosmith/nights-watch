@@ -224,4 +224,53 @@ def test_a_release_that_fails_is_logged_and_the_outcome_keeps_its_details(caplog
                              Channel.WHATSAPP: Recorder()}, incidents=NoReload())
     (outcome,) = run(case, labelled("a"))
     assert outcome.event == "opened" and outcome.failed == (Channel.SLACK,)
+    assert outcome.sent == (Channel.TEAMS, Channel.WHATSAPP) and outcome.incident_id
     assert any(r.levelno == logging.ERROR and "release" in r.getMessage() for r in caplog.records)
+
+
+def test_staleness_is_measured_from_the_alerts_own_last_sighting():
+    clock, incidents = Clock(), MemoryIncidents()
+    recorders = {c: Recorder() for c in Channel}
+    case = use_case(POLICY, recorders, clock=clock, incidents=incidents,
+                    stale_after=timedelta(hours=6), window=timedelta(minutes=15))
+    (first,) = run(case, labelled("a"))
+    clock.advance(hours=5)
+    run(case, labelled("a"))  # a re-sent: fresh again
+    clock.advance(hours=5)  # 10 h after opening, 5 h after a's last sighting
+    (again,) = run(case, labelled("a"))
+    assert again.incident_id == first.incident_id and again.event == "attached"
+
+
+def test_a_stale_alert_is_let_go_alone_while_its_siblings_keep_the_incident():
+    clock, incidents = Clock(), MemoryIncidents()
+    case = use_case(POLICY, {c: Recorder() for c in Channel}, clock=clock, incidents=incidents,
+                    stale_after=timedelta(hours=6), window=timedelta(minutes=15))
+    first, _ = run(case, labelled("a"), labelled("b"))
+    for _ in range(7):  # b keeps being re-sent every hour; a never is
+        clock.advance(hours=1)
+        run(case, labelled("b"))
+    clock.advance(hours=1)  # past the window since b's last re-send too
+    (again,) = run(case, labelled("a"))
+    old = incidents.get(first.incident_id)
+    assert again.event == "opened" and again.incident_id != first.incident_id
+    assert str(old.status) == "open" and not old.firing("fp-a") and old.firing("fp-b")
+
+
+def test_a_stale_alert_inside_the_window_simply_refreshes_its_incident(caplog):
+    caplog.set_level(logging.INFO)
+    clock, incidents = Clock(), MemoryIncidents()
+    case = use_case(POLICY, {c: Recorder() for c in Channel}, clock=clock, incidents=incidents,
+                    stale_after=timedelta(hours=6), window=timedelta(minutes=15))
+    first, _ = run(case, labelled("a"), labelled("b"))
+    for _ in range(7):  # b keeps being re-sent every hour; a goes stale
+        clock.advance(hours=1)
+        run(case, labelled("b"))
+    outcomes = run(case, labelled("b"), labelled("a"))  # a's incident is busy: a refreshes
+    assert {o.incident_id for o in outcomes} == {first.incident_id}
+    assert not any("stale" in r.getMessage() for r in caplog.records)
+
+
+def test_outcomes_come_back_in_the_order_of_the_request():
+    case = use_case(POLICY, {c: Recorder() for c in Channel})
+    alerts = [labelled("a", status=Status.RESOLVED), labelled("b"), labelled("c")]
+    assert [o.alert for o in run(case, *alerts)] == alerts

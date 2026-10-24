@@ -175,8 +175,10 @@ class ReceiveAlert:
         now = self._clock()
         fingerprint = alert.fingerprint.value
         holder = self._incidents.find_firing(app, fingerprint)
-        if holder is not None and holder.is_stale(fingerprint, now, self._stale_after):
-            # Not re-sent for too long: its resolve was lost. Let it go, then treat it as new.
+        if (holder is not None and holder.is_stale(fingerprint, now, self._stale_after)
+                and not holder.accepts(alert, now, self._window, self._stale_after)):
+            # Not re-sent for too long, and its incident has gone quiet: its resolve was lost.
+            # Let it go there, then treat it as new. (Inside the window it simply refreshes.)
             holder.resolve(fingerprint, now)
             self._incidents.save(holder)
             log.info("alert %r went stale in incident %s; marked resolved there", alert.title,

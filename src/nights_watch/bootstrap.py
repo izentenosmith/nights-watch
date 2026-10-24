@@ -64,7 +64,7 @@ class Settings(BaseModel):
     whatsapp_template_lang: str | None = None
     whatsapp_min_severity: SeverityName = "critical"
     group_window: int = Field(900, ge=1, le=7 * 24 * 3600)  # seconds
-    alert_stale_after: int = Field(21600, ge=60, le=30 * 24 * 3600)  # seconds
+    alert_stale_after: int = Field(86400, ge=60, le=30 * 24 * 3600)  # seconds
     db_path: Path = Path("data/nightswatch.sqlite")
     public_url: str = "http://localhost:8000"
 
@@ -82,11 +82,14 @@ class Settings(BaseModel):
         # fragment. The error never quotes the value (urlsplit's own errors would).
         try:
             url = urlsplit(value)
-            _ = url.port  # raises on a port that isn't a number
-            plain = (url.scheme in ("http", "https") and url.hostname and not url.username
-                     and not url.password and not url.query and not url.fragment
-                     and value == value.strip() and " " not in value)
-        except ValueError:
+            plain = (
+                url.scheme in ("http", "https") and url.hostname and url.port != 0
+                # urlsplit drops tabs and newlines and reads a bare "?" or "#" as empty, so the
+                # raw text is checked too; "@" means credentials, "\\" and "|" break links.
+                and not any(c in value for c in "?#@\\|")
+                and not any(c.isspace() or not c.isprintable() for c in value)
+            )
+        except ValueError:  # urlsplit's own errors quote the URL, so they never get out
             plain = False
         if not plain:
             raise ValueError(
@@ -103,6 +106,14 @@ class Settings(BaseModel):
         except ValidationError as e:  # raised below, unchained: the original quotes the value
             problem = describe(e, lambda loc: f"NW_{str(loc[0]).upper()}")
         raise StartupError(problem)
+
+    def check(self) -> None:
+        """Rules between settings."""
+        if self.alert_stale_after <= self.group_window:
+            raise StartupError(
+                "NW_ALERT_STALE_AFTER must be above NW_GROUP_WINDOW: an alert would go stale "
+                "before its group's window closed"
+            )
 
     @property
     def whatsapp_ready(self) -> bool:
@@ -186,6 +197,7 @@ def build_app(
     if not catalog:
         raise StartupError(f"no apps in catalog directory {catalog_dir}: nothing to watch")
     settings = Settings.from_env(env)
+    settings.check()
     missing = settings.missing_whatsapp_credentials()
     if 0 < len(missing) < len(WHATSAPP_CREDENTIALS):
         log.warning("whatsapp is disabled: partly configured, missing %s", ", ".join(missing))
