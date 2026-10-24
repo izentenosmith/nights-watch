@@ -1,5 +1,6 @@
 """Loads and validates catalog/<app>.yaml files: which apps Night's Watch watches."""
 
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -82,28 +83,46 @@ class AppFile(_Strict):
         return WatchedApp(self.name, LabelMatcher(self.match))
 
 
-def describe(error: ValidationError, name=lambda loc: ".".join(map(str, loc))) -> str:
+# A key the user wrote may itself be a pasted secret; only plain field-like keys are shown.
+_PLAIN_KEY = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def _where(loc: tuple) -> str:
+    shown = [str(p) if isinstance(p, int) or _PLAIN_KEY.match(p) else "<key>" for p in loc]
+    return ".".join(shown) or "(whole file)"
+
+
+def describe(error: ValidationError, where=_where) -> str:
     """Where and why, never the rejected value: a value pasted by mistake may be a secret."""
     return "; ".join(
-        f"{name(e['loc'])}: {e['msg']}" for e in error.errors(include_input=False, include_url=False)
+        f"{where(e['loc'])}: {e['msg']}" for e in error.errors(include_input=False, include_url=False)
     )
 
 
 def parse_app_file(path: Path) -> AppFile:
+    # Each failure is turned into text inside its `except` and raised outside it, so the
+    # original exception (which may quote the secret) isn't chained to the CatalogError.
     try:
-        return AppFile.model_validate(yaml.safe_load(path.read_text()))
+        data = yaml.safe_load(path.read_text())
     except yaml.YAMLError as e:
         mark = getattr(e, "problem_mark", None)
-        where = f" at line {mark.line + 1}" if mark else ""
-        raise CatalogError(f"{path.name}: invalid YAML{where}") from None
-    except ValidationError as e:
-        raise CatalogError(f"{path.name}: {describe(e)}") from None
+        problem = f"invalid YAML at line {mark.line + 1}" if mark else "invalid YAML"
+    except (OSError, UnicodeDecodeError) as e:
+        problem = f"can't be read ({type(e).__name__})"
+    else:
+        try:
+            return AppFile.model_validate(data)
+        except ValidationError as e:
+            problem = describe(e)
+    raise CatalogError(f"{path.name}: {problem}")
 
 
 def load_catalog(directory: Path) -> dict[str, AppFile]:
     """Every <name>.yaml in the directory; files starting with _ (the template) are skipped."""
-    if not directory.is_dir():
+    if not directory.exists():
         raise CatalogError(f"catalog directory {directory} does not exist")
+    if not directory.is_dir():
+        raise CatalogError(f"catalog directory {directory} is not a directory")
     apps = {}
 
 

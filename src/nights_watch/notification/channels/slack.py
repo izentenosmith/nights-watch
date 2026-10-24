@@ -19,8 +19,11 @@ MAX_LINKED_URL = 2500
 
 def render(message: Message) -> dict:
     context = f"Started {message.starts_at:%Y-%m-%d %H:%M UTC}"
-    if message.generator_url and len(message.generator_url) <= MAX_LINKED_URL:
-        context += f" · <{_escape(message.generator_url)}|source>"
+    if message.generator_url:
+        # `|` ends the URL inside a Slack link and has no escape; percent-encoding keeps it
+        url = _escape(message.generator_url.replace("|", "%7C"))
+        if len(url) <= MAX_LINKED_URL:
+            context += f" · <{url}|source>"
     return {
         "text": f"[{message.severity}] {_escape(message.app)}: {_escape(message.title)}",
         "blocks": [

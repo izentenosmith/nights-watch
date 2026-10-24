@@ -4,9 +4,12 @@ Slack, Teams and WhatsApp are faked at the HTTP boundary with httpx.MockTranspor
 nothing here touches the network, the real environment or a .env file.
 """
 
+import asyncio
 import copy
 import json
 import logging
+import time
+import traceback
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -39,16 +42,19 @@ HOSTS = {"hooks.slack.test": "slack", "teams.test": "teams", "graph.facebook.com
 class FakeChannels:
     """Answers like Slack, Teams and the WhatsApp Cloud API, and records every request.
 
-    `fail` maps a channel (or host) to the HTTP status or exception it answers with.
+    `fail` maps a channel (or host) to the HTTP status or exception it answers with;
+    `slow`, to the seconds it takes to answer.
     """
 
-    def __init__(self, fail=None):
+    def __init__(self, fail=None, slow=None):
         self.requests: list[httpx.Request] = []
         self.fail = fail or {}
+        self.slow = slow or {}
 
-    def handler(self, request: httpx.Request) -> httpx.Response:
+    async def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         channel = channel_of(request)
+        await asyncio.sleep(self.slow.get(channel, 0))
         failure = self.fail.get(channel)
         if isinstance(failure, Exception):
             raise failure
@@ -70,10 +76,10 @@ def channel_of(request: httpx.Request) -> str:
 
 
 @contextmanager
-def running(env=None, catalog=CATALOG, fail=None):
-    channels = FakeChannels(fail)
+def running(env=None, catalog=CATALOG, fail=None, slow=None, **build):
+    channels = FakeChannels(fail, slow)
     env = ALL_CHANNELS if env is None else env
-    app = build_app(env, catalog, transport=httpx.MockTransport(channels.handler))
+    app = build_app(env, catalog, transport=httpx.MockTransport(channels.handler), **build)
     with TestClient(app) as client:
         yield client, channels
 
@@ -107,10 +113,17 @@ def unmatched(client: TestClient) -> float:
     raise AssertionError("nightswatch_unmatched_alerts_total is not on /metrics")
 
 
+# Distinctive pieces of every secret: a log line holding only part of one still leaks it.
+SECRET_FRAGMENTS = (
+    "slack-secret", "/services/", "teams-secret", "sig=", "wa-token",
+    ALL_CHANNELS["NW_WHATSAPP_PHONE_ID"], ALL_CHANNELS["NW_WHATSAPP_TO"],
+    ALL_CHANNELS["NW_KNOCK_KNOCK_WHATSAPP_TO"],
+)
+
+
 def assert_no_secrets_in(text: str) -> None:
-    for name in ("NW_SLACK_WEBHOOK_URL", "NW_TEAMS_WEBHOOK_URL", "NW_WHATSAPP_TOKEN",
-                 "NW_WHATSAPP_PHONE_ID", "NW_WHATSAPP_TO", "NW_KNOCK_KNOCK_WHATSAPP_TO"):
-        assert ALL_CHANNELS[name] not in text, name
+    for fragment in SECRET_FRAGMENTS:
+        assert fragment not in text, fragment
 
 
 def whatsapp_params(channels: FakeChannels) -> list[str]:
@@ -201,17 +214,35 @@ def test_ac6_the_sample_catalog_needs_its_whatsapp_variable():
 
 
 def test_ac6_a_missing_or_empty_catalog_directory_stops_startup(tmp_path):
-    with pytest.raises(StartupError, match="nowhere"):
+    with pytest.raises(StartupError, match="does not exist"):
         build_app(ALL_CHANNELS, tmp_path / "nowhere")
+    with pytest.raises(StartupError, match="no apps"):
+        build_app(ALL_CHANNELS, tmp_path)
+    (tmp_path / "_template.yaml").write_text((CATALOG / "_template.yaml").read_text())
     with pytest.raises(StartupError, match="no apps"):
         build_app(ALL_CHANNELS, tmp_path)
 
 
 def test_ac6_a_bad_severity_floor_names_the_variable_without_its_value():
+    env = ALL_CHANNELS | {"NW_SLACK_MIN_SEVERITY": "hooks-secret"}  # not on the raising line
     with pytest.raises(StartupError) as error:
-        build_app(ALL_CHANNELS | {"NW_SLACK_MIN_SEVERITY": "hooks-secret"}, CATALOG)
+        build_app(env, CATALOG)
     assert "NW_SLACK_MIN_SEVERITY" in str(error.value)
-    assert "hooks-secret" not in str(error.value)
+    assert "hooks-secret" not in "".join(traceback.format_exception(error.value))
+    assert error.value.__cause__ is None and error.value.__context__ is None
+
+
+def test_ac6_a_catalog_error_stops_startup_without_echoing_the_value(tmp_path):
+    write_app(tmp_path, "shop", {"namespace": "shop"},
+              {"slack": {"webhook_env": "https://hooks.slack.com/services/T0/B0/CATALOGSECRET"}})
+    with pytest.raises(StartupError) as error:
+        build_app(ALL_CHANNELS, tmp_path)
+    assert "shop.yaml" in str(error.value)
+    printed, chained = "".join(traceback.format_exception(error.value)), error.value
+    while chained is not None:
+        printed += repr(chained)
+        chained = chained.__cause__ or chained.__context__
+    assert "CATALOGSECRET" not in printed
 
 
 def test_ac6_severity_floors_ignore_case(tmp_path):
@@ -271,8 +302,9 @@ def test_ac9_compose_runs_the_app_with_env_and_catalog_on_localhost():
     (catalog_mount,) = [v for v in service["volumes"] if str(v).startswith("./catalog:")]
     assert catalog_mount.split(":")[1] == service["environment"]["NW_CATALOG_DIR"]
     assert service["ports"] == ["127.0.0.1:8000:8000"]
-    ignored = (ROOT / ".dockerignore").read_text().splitlines()
-    assert {"**/.env", "**/.env.*"} <= set(ignored)  # no .env anywhere ends up in the image
+    ignored = [line.strip() for line in (ROOT / ".dockerignore").read_text().splitlines()]
+    assert {"**/.env", "**/.env.*", "**/*.env"} <= set(ignored)  # no env file in the image
+    assert not [line for line in ignored if line.startswith("!") and "env" in line]
 
 
 # --- Channel payloads ----------------------------------------------------------------------
@@ -568,6 +600,27 @@ def test_edge_a_transport_failure_is_isolated_like_a_500(failure, caplog):
     assert channels.called() == ["slack", "teams", "whatsapp"]
     assert any(r.levelno >= logging.WARNING and "slack" in r.getMessage() for r in caplog.records)
     assert_no_secrets_in(caplog.text)
+
+
+def test_edge_a_start_time_outside_utc_range_is_rejected_with_422():
+    with running() as (client, channels):
+        response = client.post("/alerts/alertmanager", json=alertmanager(
+            alert(knock_knock()) | {"startsAt": "0001-01-01T00:00:00+01:00"}))
+    assert response.status_code == 422
+    assert channels.called() == []
+
+
+def test_edge_a_channel_slower_than_the_send_timeout_doesnt_hold_the_response(caplog):
+    with running(slow={"slack": 2}, send_timeout=0.1) as (client, channels):
+        started = time.perf_counter()
+        response = client.post(
+            "/alerts/alertmanager", json=fixture("alertmanager_firing_critical.json")
+        )
+        elapsed = time.perf_counter() - started
+    assert response.status_code == 202
+    assert elapsed < 1.5
+    assert channels.called() == ["slack", "teams", "whatsapp"]
+    assert any("slack" in r.getMessage() and "timed out" in r.getMessage() for r in caplog.records)
 
 
 def test_healthz_answers_200():

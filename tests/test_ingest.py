@@ -117,3 +117,16 @@ def test_start_times_are_utc(started_at):
     payload = {"alerts": [{"labels": {}, "startsAt": started_at}]}
     (am,) = AlertmanagerPayload.model_validate(payload).to_alerts()
     assert am.starts_at.utcoffset().total_seconds() == 0 and am.starts_at.hour == 3
+
+
+def test_a_blank_severity_field_falls_back_to_the_label():
+    payload = {"title": "X", "severity": "  ", "labels": {"severity": "critical"}}
+    assert GenericAlert.model_validate(payload).to_alert().severity is Severity.CRITICAL
+
+
+@pytest.mark.parametrize("started_at", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:30:00-01:00"])
+def test_a_start_time_outside_the_utc_range_is_invalid(started_at):
+    with pytest.raises(ValidationError):
+        GenericAlert.model_validate({"title": "X", "started_at": started_at})
+    with pytest.raises(ValidationError):
+        AlertmanagerPayload.model_validate({"alerts": [{"labels": {}, "startsAt": started_at}]})

@@ -36,3 +36,19 @@ def test_slack_escapes_alert_text_in_every_mrkdwn_field():
         assert "<5%" not in text and "<2>" not in text
     assert "&lt;!channel&gt; rate &lt;5% &amp; &gt;2%" in payload["text"]
     assert "https://x/?a=1&amp;b=&lt;2&gt;" in json.dumps(payload)
+
+
+def context_text(payload):
+    (context,) = [b for b in payload["blocks"] if b["type"] == "context"]
+    return context["elements"][0]["text"]
+
+
+def test_slack_context_stays_within_limits_when_escaping_lengthens_the_url():
+    url = "https://g/?" + "a=1&" * 620  # under the limit raw, far over it escaped
+    assert len(context_text(slack.render(message(url=url)))) <= 3000
+
+
+def test_a_pipe_in_the_url_does_not_break_the_slack_link():
+    text = context_text(slack.render(message(url='http://prom/graph?g0.expr=up{job=~"a|b"}')))
+    link = text[text.index("<") + 1 : text.index(">")]
+    assert link == 'http://prom/graph?g0.expr=up{job=~"a%7Cb"}|source'

@@ -48,3 +48,8 @@ def test_create_app_loads_the_catalog_from_nw_catalog_dir(clean_env, tmp_path):
     (tmp_path / ".env").write_text(f"NW_CATALOG_DIR={catalog}\n")
     with TestClient(create_app()) as client:
         assert [a["name"] for a in client.get("/apps").json()] == ["shop"]
+
+
+def test_a_padded_value_arrives_stripped(clean_env):
+    clean_env.setenv("NW_SLACK_WEBHOOK_URL", "  https://x.test/hook \n")
+    assert read_environment()["NW_SLACK_WEBHOOK_URL"] == "https://x.test/hook"

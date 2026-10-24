@@ -65,8 +65,9 @@ class Settings(BaseModel):
             return cls.model_validate(
                 {k.removeprefix("NW_").lower(): v for k, v in env.items() if k.startswith("NW_")}
             )
-        except ValidationError as e:
-            raise StartupError(describe(e, lambda loc: f"NW_{str(loc[0]).upper()}")) from None
+        except ValidationError as e:  # raised below, unchained: the original quotes the value
+            problem = describe(e, lambda loc: f"NW_{str(loc[0]).upper()}")
+        raise StartupError(problem)
 
     @property
     def whatsapp_ready(self) -> bool:
@@ -135,13 +136,14 @@ def build_app(
     env: Mapping[str, str],
     catalog_dir: Path,
     transport: httpx.AsyncBaseTransport | None = None,
+    send_timeout: float = SEND_TIMEOUT_SECONDS,
 ) -> FastAPI:
     """The whole app, from explicit values: tests pass their own env and a fake transport."""
     env = _set_only(env)
     try:
         catalog = load_catalog(catalog_dir)
     except CatalogError as e:
-        raise StartupError(str(e)) from None
+        raise StartupError(str(e)) from e  # CatalogError's text never holds a value
     if not catalog:
         raise StartupError(f"no apps in catalog directory {catalog_dir}: nothing to watch")
     settings = Settings.from_env(env)
@@ -157,9 +159,9 @@ def build_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        async with httpx.AsyncClient(transport=transport, timeout=SEND_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(transport=transport, timeout=send_timeout) as client:
             app.state.receive_alert = ReceiveAlert(
-                AlertRouter(apps), policy, _notifiers(settings, client), SEND_TIMEOUT_SECONDS
+                AlertRouter(apps), policy, _notifiers(settings, client), send_timeout
             )
             yield
 

@@ -67,8 +67,7 @@ class ReceiveAlert:
         message = Message(alert.severity, app, alert.title, alert.starts_at, alert.generator_url)
         deliveries = self._policy.deliveries(app, alert.severity)
         if not deliveries:
-            log.info("%s alert %r for %s: no enabled channel has a floor that low",
-                     alert.severity, alert.title, app)
+            self._log_undelivered(alert, app)
         delivered = await asyncio.gather(*(self._send(d, message) for d in deliveries))
         return Outcome(
             alert,
@@ -76,6 +75,14 @@ class ReceiveAlert:
             sent=tuple(d.channel for d, ok in zip(deliveries, delivered) if ok),
             failed=tuple(d.channel for d, ok in zip(deliveries, delivered) if not ok),
         )
+
+    def _log_undelivered(self, alert: Alert, app: str) -> None:
+        if not any(view.enabled for view in self._policy.view(app).values()):
+            log.warning("%s alert %r for %s dropped: no channel is configured for %s",
+                        alert.severity, alert.title, app, app)
+        else:
+            log.info("%s alert %r for %s: no enabled channel has a floor that low",
+                     alert.severity, alert.title, app)
 
     async def _send(self, delivery: Delivery, message: Message) -> bool:
         """One channel failing never stops the others; the failure is logged without secrets."""
