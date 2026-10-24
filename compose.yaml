@@ -1,0 +1,12 @@
+services:
+  nights-watch:
+    build: .
+    env_file: .env
+    environment:
+      NW_CATALOG_DIR: /app/catalog
+    volumes:
+      - ./catalog:/app/catalog:ro
+    ports:
+      # Localhost only: /alerts/* has no auth yet. Add it before an alert source outside
+      # this host (e.g. Alertmanager in k3d, M2) needs to reach the port.
+      - "127.0.0.1:8000:8000"

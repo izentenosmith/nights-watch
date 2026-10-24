@@ -1,4 +1,5 @@
 import re
+import traceback
 from pathlib import Path
 
 import pytest
@@ -130,3 +131,128 @@ def test_severity_floor_is_one_of_the_three_levels(tmp_path):
     _write(tmp_path, "shop", notify={"slack": {"min_severity": "urgent"}})
     with pytest.raises(CatalogError):
         load_catalog(tmp_path)
+
+
+def test_channel_without_a_floor_inherits_the_global_floor(tmp_path):
+    _write(tmp_path, "shop", notify={"slack": {"webhook_env": "NW_SHOP_SLACK_WEBHOOK_URL"}})
+    assert load_catalog(tmp_path)["shop"].notify.slack.min_severity is None
+
+
+def test_an_app_file_becomes_a_watched_app(tmp_path):
+    _write(tmp_path, "shop", match={"namespace": "shop", "app": "api"})
+    app = load_catalog(tmp_path)["shop"].to_watched_app()
+    assert app.name == "shop"
+    assert app.matcher.matches({"namespace": "shop", "app": "api", "pod": "x"})
+
+
+def everything_printed_about(error: BaseException) -> str:
+    """The error's text, its formatted traceback, and every exception chained to it."""
+    printed = "".join(traceback.format_exception(error))
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        printed += repr(current) + str(current)
+        pending += [current.__cause__, current.__context__]
+    return printed
+
+
+@pytest.mark.parametrize(
+    "notify, secret",
+    [
+        ({"slack": {"webhook_env": "https://hooks.slack.com/services/T0/B0/ABCDEFGHIJKLMNOPQRSTUVWX"}},
+         "QRSTUVWX"),
+        ({"whatsapp": {"to_env": "+56912345678"}}, "56912345678"),
+    ],
+    ids=["webhook url", "phone number"],
+)
+def test_a_validation_error_names_the_field_but_never_echoes_the_value(tmp_path, notify, secret):
+    _write(tmp_path, "shop", notify=notify)
+    with pytest.raises(CatalogError) as error:
+        load_catalog(tmp_path)
+    assert "shop.yaml" in str(error.value) and "notify." in str(error.value)
+    assert secret not in everything_printed_about(error.value)
+
+
+def test_a_typo_in_a_key_is_named(tmp_path):
+    _write(tmp_path, "shop", notify={"slack": {"min-severity": "warning"}})
+    with pytest.raises(CatalogError, match=r"notify\.slack\.min-severity: Extra inputs"):
+        load_catalog(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["!!int xoxbSECRET123", "!!bool hooks-SECRET", "!!float", "!!timestamp SECRET-13-01"],
+)
+def test_a_value_yaml_cant_construct_is_named_without_its_content(tmp_path, value):
+    _write(tmp_path, "shop")
+    path = tmp_path / "shop.yaml"
+    path.write_text(path.read_text() + f"extra: {value}\n")
+    with pytest.raises(CatalogError) as error:
+        load_catalog(tmp_path)
+    assert str(error.value).startswith("shop.yaml: ")
+    assert "SECRET" not in everything_printed_about(error.value)
+
+
+def test_an_impossible_date_is_named(tmp_path):
+    _write(tmp_path, "shop")
+    path = tmp_path / "shop.yaml"
+    path.write_text(path.read_text().replace("description: an app", "description: 2024-13-01"))
+    with pytest.raises(CatalogError, match="^shop.yaml: "):
+        load_catalog(tmp_path)
+
+
+def test_an_unreadable_catalog_directory_says_so(tmp_path):
+    locked = tmp_path / "catalog"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        with pytest.raises(CatalogError, match="can't be read"):
+            load_catalog(locked)
+    finally:
+        locked.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "name: shop\nnotify: {slack: {webhook_env: xoxb-SECRET-TOKEN\n",
+        "name: shop\nnotify:\n  slack:\n    webhook_env: xoxb: SECRET\n",
+    ],
+    ids=["unclosed mapping", "error on the secret's line"],
+)
+def test_a_yaml_syntax_error_doesnt_echo_the_line(tmp_path, text):
+    (tmp_path / "shop.yaml").write_text(text)
+    with pytest.raises(CatalogError) as error:
+        load_catalog(tmp_path)
+    assert "shop.yaml" in str(error.value)
+    assert "SECRET" not in everything_printed_about(error.value)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"\xff\xfename: shop\n", b""],
+    ids=["not utf-8", "empty"],
+)
+def test_an_unreadable_or_empty_file_is_named(tmp_path, content):
+    (tmp_path / "shop.yaml").write_bytes(content)
+    with pytest.raises(CatalogError) as error:
+        load_catalog(tmp_path)
+    assert str(error.value).startswith("shop.yaml: ")
+    assert ": :" not in str(error.value)
+
+
+def test_a_directory_named_like_an_app_file_is_named(tmp_path):
+    (tmp_path / "shop.yaml").mkdir()
+    with pytest.raises(CatalogError, match="^shop.yaml: "):
+        load_catalog(tmp_path)
+
+
+def test_the_catalog_path_must_be_an_existing_directory(tmp_path):
+    with pytest.raises(CatalogError, match="does not exist"):
+        load_catalog(tmp_path / "nowhere")
+    (tmp_path / "file.yaml").write_text("")
+    with pytest.raises(CatalogError, match="not a directory"):
+        load_catalog(tmp_path / "file.yaml")

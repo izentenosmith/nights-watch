@@ -1,0 +1,34 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"HighErrorRate\"}",
+  "truncatedAlerts": 0,
+  "status": "firing",
+  "receiver": "nights-watch",
+  "groupLabels": { "alertname": "HighErrorRate" },
+  "commonLabels": {
+    "alertname": "HighErrorRate",
+    "namespace": "knock-knock",
+    "severity": "critical"
+  },
+  "commonAnnotations": { "summary": "Error rate above 5% on knock-knock" },
+  "externalURL": "http://alertmanager:9093",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "namespace": "knock-knock",
+        "app": "knock-python",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Error rate above 5% on knock-knock",
+        "description": "5xx ratio on /api/knock is 12% over the last 5 minutes."
+      },
+      "startsAt": "2026-10-24T03:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus:9090/graph?g0.expr=job%3Aerror_ratio%3Arate5m+%3E+0.05",
+      "fingerprint": "c8d1f5e3a2b4c6d7"
+    }
+  ]
+}

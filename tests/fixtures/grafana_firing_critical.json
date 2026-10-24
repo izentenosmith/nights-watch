@@ -1,0 +1,41 @@
+{
+  "receiver": "nights-watch",
+  "status": "firing",
+  "orgId": 1,
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "grafana_folder": "knock-knock",
+        "namespace": "knock-knock",
+        "severity": "critical"
+      },
+      "annotations": { "summary": "Error rate above 5% on knock-knock" },
+      "startsAt": "2026-10-24T03:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://grafana:3000/alerting/grafana/aaa111/view",
+      "fingerprint": "57c6d9296de2ad39",
+      "silenceURL": "http://grafana:3000/alerting/silence/new?alertmanager=grafana",
+      "dashboardURL": "",
+      "panelURL": "",
+      "values": { "B": 0.12, "C": 1 },
+      "valueString": "[ var='B' labels={namespace=knock-knock} value=0.12 ]"
+    }
+  ],
+  "groupLabels": { "alertname": "HighErrorRate", "grafana_folder": "knock-knock" },
+  "commonLabels": {
+    "alertname": "HighErrorRate",
+    "grafana_folder": "knock-knock",
+    "namespace": "knock-knock",
+    "severity": "critical"
+  },
+  "commonAnnotations": { "summary": "Error rate above 5% on knock-knock" },
+  "externalURL": "http://grafana:3000/",
+  "version": "1",
+  "groupKey": "{}/{severity=\"critical\"}:{alertname=\"HighErrorRate\"}",
+  "truncatedAlerts": 0,
+  "title": "[FIRING:1] HighErrorRate knock-knock (knock-knock critical)",
+  "state": "alerting",
+  "message": "**Firing**\n\nValue: B=0.12\nLabels:\n - alertname = HighErrorRate\n"
+}

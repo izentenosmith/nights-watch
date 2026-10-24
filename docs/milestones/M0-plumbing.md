@@ -56,12 +56,15 @@ Dockerfile · compose.yaml
     `{"type": "message", "attachments": [...]}`.
   - WhatsApp: Cloud API `POST /{phone_id}/messages` with a **template** message.
     Add `NW_WHATSAPP_TEMPLATE` and `NW_WHATSAPP_TEMPLATE_LANG` to `.env.example`.
-- **Config:** `pydantic-settings` reads `NW_*` from the environment and from
-  `.env` locally. It's the one new dependency this milestone needs for config.
+- **Config:** `NW_*` come from the environment, over `.env` locally (read with
+  `python-dotenv`), and are validated by a pydantic model. `pydantic-settings` was the first
+  plan, but it ignores undeclared variables from the environment, which are exactly the
+  per-app ones the catalog names, and it always reads `os.environ`, so tests couldn't pass
+  their own values.
 - **Startup fails loudly** when a catalog file names an env var that isn't set,
   naming the file, the field and the variable.
 - **HTTP:** `httpx` everywhere, so tests use `httpx.MockTransport`, never the network.
-- **The domain imports nothing from FastAPI, httpx or pydantic-settings.**
+- **The domain imports nothing from FastAPI, httpx or pydantic-settings.** (A test enforces it.)
 
 ## Acceptance criteria
 
