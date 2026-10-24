@@ -45,14 +45,22 @@ def test_domain_modules_import_no_framework_client_or_store(path):
     assert roots & FORBIDDEN == set()
 
 
-@pytest.mark.parametrize(
-    "path, allowed",
-    [
-        ("catalog/domain.py", set()),
-        ("triage/domain/alert.py", set()),
-        ("notification/domain.py", {"nights_watch.triage.domain.alert"}),
-    ],
-)
+# Which in-project modules each domain module may import. Every domain module needs a row.
+ALLOWED = {
+    "catalog/domain.py": set(),
+    "triage/domain/__init__.py": set(),
+    "triage/domain/alert.py": set(),
+    "triage/domain/incident.py": {"nights_watch.triage.domain.alert"},
+    "triage/domain/ports.py": {"nights_watch.triage.domain.incident"},
+    "notification/domain.py": {"nights_watch.triage.domain.alert"},
+}
+
+
+def test_every_domain_module_has_an_allowlist_row():
+    assert {p.relative_to(SRC).as_posix() for p in DOMAIN_MODULES} == set(ALLOWED)
+
+
+@pytest.mark.parametrize("path, allowed", sorted(ALLOWED.items()))
 def test_domain_modules_depend_only_on_the_contexts_they_are_allowed_to(path, allowed):
     own = {m for m in imported_modules(SRC / path) if m.startswith("nights_watch")}
     assert own <= allowed

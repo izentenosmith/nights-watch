@@ -1,18 +1,24 @@
 """Reads the environment, wires adapters to ports, and runs the startup checks."""
 
+import asyncio
 import logging
 import os
-from collections.abc import Mapping
+import sqlite3
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from dotenv import dotenv_values
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from prometheus_client import CollectorRegistry, Counter
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from nights_watch.api import alerts, health
+from nights_watch.api import alerts, health, runs
+from nights_watch.api.errors import validation_failed
 from nights_watch.catalog.domain import AlertRouter
 from nights_watch.catalog.yaml_catalog import AppFile, CatalogError, describe, load_catalog
 from nights_watch.catalog.yaml_catalog import Severity as SeverityName
@@ -27,7 +33,9 @@ from nights_watch.notification.domain import (
     Notifier,
 )
 from nights_watch.triage.application.receive_alert import ReceiveAlert
+from nights_watch.triage.application.record_feedback import RecordFeedback
 from nights_watch.triage.domain.alert import Severity
+from nights_watch.triage.infrastructure.sqlite_incidents import SchemaError, SqliteIncidents
 
 SEND_TIMEOUT_SECONDS = 10.0
 WHATSAPP_CREDENTIALS = ("whatsapp_token", "whatsapp_phone_id", "whatsapp_template",
@@ -55,6 +63,10 @@ class Settings(BaseModel):
     whatsapp_template: str | None = None
     whatsapp_template_lang: str | None = None
     whatsapp_min_severity: SeverityName = "critical"
+    group_window: int = Field(900, ge=1, le=7 * 24 * 3600)  # seconds
+    alert_stale_after: int = Field(86400, ge=60, le=30 * 24 * 3600)  # seconds
+    db_path: Path = Path("data/nightswatch.sqlite")
+    public_url: str = "http://localhost:8000"
 
     @field_validator(
         "slack_min_severity", "teams_min_severity", "whatsapp_min_severity", mode="before"
@@ -62,6 +74,28 @@ class Settings(BaseModel):
     @classmethod
     def _any_case(cls, value: str) -> str:
         return value.strip().lower()
+
+    @field_validator("public_url")
+    @classmethod
+    def _absolute_http_url(cls, value: str) -> str:
+        # Every message links here, so it must be a plain address: no credentials, query or
+        # fragment. The error never quotes the value (urlsplit's own errors would).
+        try:
+            url = urlsplit(value)
+            plain = (
+                url.scheme in ("http", "https") and url.hostname and url.port != 0
+                # urlsplit drops tabs and newlines and reads a bare "?" or "#" as empty, so the
+                # raw text is checked too; "@" means credentials, "\\" and "|" break links.
+                and not any(c in value for c in "?#@\\|")
+                and not any(c.isspace() or not c.isprintable() for c in value)
+            )
+        except ValueError:  # urlsplit's own errors quote the URL, so they never get out
+            plain = False
+        if not plain:
+            raise ValueError(
+                "must be a plain absolute http(s) URL, e.g. https://nightswatch.example.com"
+            )
+        return value
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -73,6 +107,14 @@ class Settings(BaseModel):
             problem = describe(e, lambda loc: f"NW_{str(loc[0]).upper()}")
         raise StartupError(problem)
 
+    def check(self) -> None:
+        """Rules between settings."""
+        if self.alert_stale_after <= self.group_window:
+            raise StartupError(
+                "NW_ALERT_STALE_AFTER must be above NW_GROUP_WINDOW: an alert would go stale "
+                "before its group's window closed"
+            )
+
     @property
     def whatsapp_ready(self) -> bool:
         """Everything WhatsApp needs besides the recipient."""
@@ -80,6 +122,9 @@ class Settings(BaseModel):
 
     def missing_whatsapp_credentials(self) -> list[str]:
         return [f"NW_{name.upper()}" for name in WHATSAPP_CREDENTIALS if not getattr(self, name)]
+
+    def run_url(self, run_id: str) -> str:
+        return f"{self.public_url.rstrip('/')}/runs/{run_id}"
 
     def channels(self) -> dict[Channel, ChannelSettings]:
         return {
@@ -141,6 +186,7 @@ def build_app(
     catalog_dir: Path,
     transport: httpx.AsyncBaseTransport | None = None,
     send_timeout: float = SEND_TIMEOUT_SECONDS,
+    clock: Callable[[], datetime] | None = None,
 ) -> FastAPI:
     """The whole app, from explicit values: tests pass their own env and a fake transport."""
     env = _set_only(env)
@@ -151,12 +197,15 @@ def build_app(
     if not catalog:
         raise StartupError(f"no apps in catalog directory {catalog_dir}: nothing to watch")
     settings = Settings.from_env(env)
+    settings.check()
     missing = settings.missing_whatsapp_credentials()
     if 0 < len(missing) < len(WHATSAPP_CREDENTIALS):
         log.warning("whatsapp is disabled: partly configured, missing %s", ", ".join(missing))
     if missing := _unset_references(catalog, env):
         raise StartupError("catalog references unset variables:\n" + "\n".join(missing))
 
+    incidents = _open_incidents(settings.db_path)
+    lock = asyncio.Lock()  # ReceiveAlert and RecordFeedback both load, change and save incidents
     apps = [app.to_watched_app() for app in catalog.values()]
     policy = NotificationPolicy(
         settings.channels(), {name: _overrides(app, env) for name, app in catalog.items()}
@@ -168,22 +217,41 @@ def build_app(
     async def lifespan(app: FastAPI):
         async with httpx.AsyncClient(transport=transport, timeout=send_timeout) as client:
             app.state.receive_alert = ReceiveAlert(
-                AlertRouter(apps), policy, _notifiers(settings, client), send_timeout
+                AlertRouter(apps), policy, _notifiers(settings, client),
+                incidents=incidents, lock=lock,
+                window=timedelta(seconds=settings.group_window),
+                stale_after=timedelta(seconds=settings.alert_stale_after),
+                clock=clock or (lambda: datetime.now(UTC)),
+                run_url=settings.run_url, send_timeout=send_timeout,
             )
             yield
 
     app = FastAPI(title="Night's Watch", lifespan=lifespan)
     app.state.apps = apps
     app.state.policy = policy
+    app.state.incidents = incidents
+    app.state.record_feedback = RecordFeedback(incidents, lock)
     app.state.registry = CollectorRegistry()
     app.state.unmatched_alerts = Counter(
         "nightswatch_unmatched_alerts",
         "Alerts that matched no watched app and were dropped.",
         registry=app.state.registry,
     )
+    app.add_exception_handler(RequestValidationError, validation_failed)
     app.include_router(alerts.router)
     app.include_router(health.router)
+    app.include_router(runs.router)
     return app
+
+
+def _open_incidents(path: Path) -> SqliteIncidents:
+    try:
+        return SqliteIncidents(path)
+    except SchemaError as e:
+        problem = str(e)
+    except (sqlite3.Error, OSError) as e:
+        problem = f"{path}: can't open the database ({type(e).__name__})"
+    raise StartupError(problem)
 
 
 def _set_only(env: Mapping[str, str | None]) -> dict[str, str]:

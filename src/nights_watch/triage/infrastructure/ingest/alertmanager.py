@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from nights_watch.triage.domain.alert import Alert, Fingerprint, Severity, Status
-from nights_watch.triage.infrastructure.ingest import UtcDatetime, now
+from nights_watch.triage.infrastructure.ingest import Payload, UtcDatetime, now
 
 
 class _Alert(BaseModel):
@@ -35,7 +35,7 @@ class _Alert(BaseModel):
         )
 
 
-class AlertmanagerPayload(BaseModel):
+class AlertmanagerPayload(Payload):
     alerts: list[_Alert]
 
     def to_alerts(self) -> list[Alert]:

@@ -59,6 +59,8 @@ class Message:
     title: str
     starts_at: datetime
     generator_url: str | None = None
+    run_url: str | None = None  # the incident's report page
+    escalated: bool = False  # the incident's severity just rose to `severity`
 
 
 class DeliveryError(Exception):

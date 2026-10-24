@@ -4,9 +4,16 @@ services:
     env_file: .env
     environment:
       NW_CATALOG_DIR: /app/catalog
+      NW_DB_PATH: /app/data/nightswatch.sqlite
     volumes:
       - ./catalog:/app/catalog:ro
+      # A named volume, not ./data: the image makes /app/data writable by the user it runs as,
+      # and a bind mount would bring the host's ownership instead.
+      - nightswatch-data:/app/data
     ports:
       # Localhost only: /alerts/* has no auth yet. Add it before an alert source outside
       # this host (e.g. Alertmanager in k3d, M2) needs to reach the port.
       - "127.0.0.1:8000:8000"
+
+volumes:
+  nightswatch-data:

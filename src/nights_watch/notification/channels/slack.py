@@ -2,7 +2,7 @@
 
 import httpx
 
-from nights_watch.notification.channels import PLACEHOLDER, post
+from nights_watch.notification.channels import PLACEHOLDER, headline, post
 from nights_watch.notification.domain import Message
 
 
@@ -24,10 +24,13 @@ def render(message: Message) -> dict:
         url = _escape(message.generator_url.replace("|", "%7C"))
         if len(url) <= MAX_LINKED_URL:
             context += f" · <{url}|source>"
+    if message.run_url:
+        context += f" · <{_escape(message.run_url)}|open the run>"
     return {
-        "text": f"[{message.severity}] {_escape(message.app)}: {_escape(message.title)}",
+        "text": f"[{message.severity}] {_escape(message.app)}: {_escape(headline(message))}",
         "blocks": [
-            {"type": "header", "text": {"type": "plain_text", "text": message.title[:MAX_HEADER]}},
+            {"type": "header",
+             "text": {"type": "plain_text", "text": headline(message)[:MAX_HEADER]}},
             {
                 "type": "section",
                 "fields": [

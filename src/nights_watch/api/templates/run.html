@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ incident.group_key }} · {{ incident.app }} · Night's Watch</title>
+  <style>
+    :root { color-scheme: light dark; --muted: #6b7280; --line: #d1d5db; }
+    body { font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 16px; }
+    main { max-width: 960px; margin: 0 auto; }
+    h1 { font-size: 1.4rem; margin: 0 0 .25rem; overflow-wrap: anywhere; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
+    dt { color: var(--muted); }
+    dd { margin: 0; }
+    .table { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--line); }
+    td { overflow-wrap: anywhere; }
+    .note { color: var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <h1>{{ incident.group_key }}</h1>
+  <dl>
+    <dt>App</dt><dd id="app">{{ incident.app }}</dd>
+    <dt>Severity</dt><dd id="severity">{{ incident.severity }}</dd>
+    <dt>Status</dt><dd id="status">{{ incident.status }}</dd>
+    <dt>Opened</dt><dd>{{ incident.opened_at | utc }}</dd>
+    <dt>Latest alert</dt><dd>{{ incident.last_alert_at | utc }}</dd>
+  </dl>
+
+  <h2>Alerts</h2>
+  <div class="table">
+    <table>
+      <thead>
+        <tr><th>Alert</th><th>Severity</th><th>State</th><th>First seen</th><th>Last seen</th><th>Fingerprint</th></tr>
+      </thead>
+      <tbody>
+      {% for alert in incident.alerts.values() %}
+        <tr>
+          <td>{{ alert.title }}</td>
+          <td>{{ alert.severity }}</td>
+          <td>{{ "firing" if alert.firing else "resolved" }}</td>
+          <td>{{ alert.first_seen | utc }}</td>
+          <td>{{ alert.last_seen | utc }}</td>
+          <td><code>{{ alert.fingerprint }}</code></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="note">The investigation arrives in M1b; feedback opens once there is a diagnosis.</p>
+</main>
+</body>
+</html>

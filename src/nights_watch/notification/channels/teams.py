@@ -5,7 +5,7 @@ The old Office 365 connector webhooks are being retired; Workflows expects this 
 
 import httpx
 
-from nights_watch.notification.channels import PLACEHOLDER, post
+from nights_watch.notification.channels import PLACEHOLDER, headline, post
 from nights_watch.notification.domain import Message
 from nights_watch.triage.domain.alert import Severity
 
@@ -18,7 +18,7 @@ def render(message: Message) -> dict:
         "body": [
             {
                 "type": "TextBlock",
-                "text": message.title,
+                "text": headline(message),
                 "weight": "Bolder",
                 "size": "Medium",
                 "wrap": True,
@@ -35,8 +35,13 @@ def render(message: Message) -> dict:
             {"type": "TextBlock", "text": PLACEHOLDER, "isSubtle": True, "wrap": True},
         ],
     }
-    if message.generator_url:
-        card["actions"] = [{"type": "Action.OpenUrl", "title": "Source", "url": message.generator_url}]
+    actions = [
+        {"type": "Action.OpenUrl", "title": title, "url": url}
+        for title, url in (("Open the run", message.run_url), ("Source", message.generator_url))
+        if url
+    ]
+    if actions:
+        card["actions"] = actions
     return {
         "type": "message",
         "attachments": [
