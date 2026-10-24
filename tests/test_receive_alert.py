@@ -1,12 +1,13 @@
 import asyncio
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from nights_watch.catalog.domain import AlertRouter, LabelMatcher, WatchedApp
 from nights_watch.notification.domain import Channel, ChannelSettings, NotificationPolicy
 from nights_watch.triage.application.receive_alert import ReceiveAlert
 from nights_watch.triage.domain.alert import Alert, Fingerprint, Severity, Status
+from nights_watch.triage.infrastructure.memory_incidents import MemoryIncidents
 
 ROUTER = AlertRouter([WatchedApp("shop", LabelMatcher({"ns": "shop"}))])
 POLICY = NotificationPolicy({c: ChannelSettings(f"{c}-dest", Severity.WARNING) for c in Channel}, {})
@@ -33,8 +34,19 @@ def alert(severity=Severity.CRITICAL, status=Status.FIRING, **labels):
     return Alert("Disk full", severity, labels, status, datetime.now(UTC), Fingerprint("f"))
 
 
+def use_case(policy, notifiers, **kwargs):
+    defaults = {
+        "incidents": MemoryIncidents(),
+        "lock": asyncio.Lock(),
+        "window": timedelta(minutes=5),
+        "clock": lambda: datetime.now(UTC),
+        "run_url": lambda run_id: f"https://nw.test/runs/{run_id}",
+    }
+    return ReceiveAlert(ROUTER, policy, notifiers, **(defaults | kwargs))
+
+
 def receive(notifiers, alerts, **kwargs):
-    return asyncio.run(ReceiveAlert(ROUTER, POLICY, notifiers, **kwargs)(alerts))
+    return asyncio.run(use_case(POLICY, notifiers, **kwargs)(alerts))
 
 
 def test_sends_to_several_channels_run_at_the_same_time():
@@ -57,13 +69,14 @@ def test_an_alert_below_every_floor_is_logged(caplog):
     caplog.set_level(logging.INFO)
     (outcome,) = receive({c: SlowNotifier(0) for c in Channel}, [alert(Severity.INFO)])
     assert outcome.sent == ()
-    (record,) = [r for r in caplog.records if "Disk full" in r.getMessage()]
-    assert record.levelno == logging.INFO and "shop" in record.getMessage()
+    (record,) = [r for r in caplog.records if "floor" in r.getMessage()]
+    assert record.levelno == logging.INFO
+    assert "shop" in record.getMessage() and "Disk full" in record.getMessage()
 
 
 def test_an_alert_for_an_app_with_no_channel_configured_is_a_warning(caplog):
     unconfigured = NotificationPolicy({c: ChannelSettings(None, Severity.WARNING) for c in Channel}, {})
-    asyncio.run(ReceiveAlert(ROUTER, unconfigured, {})([alert()]))
+    asyncio.run(use_case(unconfigured, {})([alert()]))
     (record,) = [r for r in caplog.records if "Disk full" in r.getMessage()]
     assert record.levelno == logging.WARNING
     assert "no channel is enabled" in record.getMessage()

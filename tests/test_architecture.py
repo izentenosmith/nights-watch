@@ -50,6 +50,8 @@ def test_domain_modules_import_no_framework_client_or_store(path):
     [
         ("catalog/domain.py", set()),
         ("triage/domain/alert.py", set()),
+        ("triage/domain/incident.py", {"nights_watch.triage.domain.alert"}),
+        ("triage/domain/ports.py", {"nights_watch.triage.domain.incident"}),
         ("notification/domain.py", {"nights_watch.triage.domain.alert"}),
     ],
 )

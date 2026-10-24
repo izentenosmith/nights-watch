@@ -14,8 +14,14 @@ RUN uv sync --locked --no-dev
 COPY catalog ./catalog
 ENV NW_CATALOG_DIR=/app/catalog
 
+# incidents live here; compose puts a named volume on it, which starts with this ownership
+RUN mkdir -p /app/data && chown nobody /app/data
+ENV NW_DB_PATH=/app/data/nightswatch.sqlite
+
 USER nobody
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
-CMD ["uvicorn", "nights_watch.bootstrap:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+# One worker: incidents are grouped under an in-process lock on a single SQLite file.
+# More workers need a database that serializes writers (PLAN §8: Postgres).
+CMD ["uvicorn", "nights_watch.bootstrap:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

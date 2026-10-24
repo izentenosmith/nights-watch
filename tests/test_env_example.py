@@ -17,6 +17,9 @@ def test_every_setting_the_app_reads_is_in_env_example():
 
 
 def test_secrets_and_destinations_have_no_value_in_env_example():
+    not_secret = {"NW_PUBLIC_URL"}  # Night's Watch's own address, shared in every message
     for name, value in documented().items():
+        if name in not_secret:
+            continue
         if name.endswith(("_URL", "_TOKEN", "_TO", "_PHONE_ID", "_API_KEY", "_KUBECONFIG")):
             assert value == "", name
